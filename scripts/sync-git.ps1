@@ -8,7 +8,7 @@ Set-Location $root
 $null = git remote get-url origin 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "尚未配置远程仓库。请先执行:" -ForegroundColor Yellow
-    Write-Host '  git remote add origin https://你的平台/用户名/仓库名.git' -ForegroundColor Cyan
+    Write-Host '  git remote add origin https://github.com/clawtimeAI/PegaQuant.git' -ForegroundColor Cyan
     Write-Host "详见 docs/GIT_SETUP.md"
     exit 1
 }
