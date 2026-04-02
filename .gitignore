@@ -1,0 +1,34 @@
+# Dependencies & build
+node_modules/
+.next/
+out/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs & caches
+*.log
+.turbo/
+.cache/
+
+# Cursor / local
+.cursor/

@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+SQLAlchemy>=2.0
+psycopg2-binary>=2.9
+pydantic-settings>=2.2
+cryptography>=42.0
+websockets>=12.0
