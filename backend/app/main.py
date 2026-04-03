@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import api_router
 from app.database import SessionLocal
 from app.settings import settings
-from app.services.kline_stream_service import KlineStreamService
 
 
 app = FastAPI(title="PegaQuant API")
@@ -27,6 +26,10 @@ app.include_router(api_router)
 
 @app.on_event("startup")
 async def on_startup():
+    if not settings.enable_kline_stream_service:
+        return
+    from app.services.kline_stream_service import KlineStreamService
+
     svc = KlineStreamService(session_factory=SessionLocal)
     app.state.kline_stream_service = svc
     asyncio.create_task(svc.start())
@@ -34,7 +37,7 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    svc: KlineStreamService | None = getattr(app.state, "kline_stream_service", None)
+    svc = getattr(app.state, "kline_stream_service", None)
     if svc is not None:
         await svc.stop()
 
@@ -42,7 +45,11 @@ async def on_shutdown():
 @app.websocket("/ws/klines")
 async def ws_klines(ws: WebSocket):
     await ws.accept()
-    svc: KlineStreamService = app.state.kline_stream_service
+    if not settings.enable_kline_stream_service:
+        await ws.send_json({"type": "error", "message": "deprecated"})
+        await ws.close(code=1000)
+        return
+    svc = app.state.kline_stream_service
     client = await svc.register(ws)
     try:
         while True:

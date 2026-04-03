@@ -1,12 +1,39 @@
-import { API_BASE, BINANCE_FAPI_HTTP } from "./config";
+import { API_BASE, BINANCE_FAPI_HTTP, MARKET_API_BASE } from "./config";
 import { intervalMs } from "./intervalMs";
 import type { Interval } from "./types";
 import type { StreamCandle } from "./types";
+
+type OscPoint = { time?: string; price: number; kind?: "X" | "Y" };
+export type ActiveOscillationStructure = {
+  id: number;
+  symbol: string;
+  interval: Interval;
+  start_time: string | null;
+  updated_at: string | null;
+  x_points: OscPoint[];
+  y_points: OscPoint[];
+};
 
 export async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
   if (!res.ok) throw new Error(await res.text());
   return (await res.json()) as T;
+}
+
+export async function marketApiGet<T>(path: string): Promise<T> {
+  const res = await fetch(`${MARKET_API_BASE}${path}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(await res.text());
+  return (await res.json()) as T;
+}
+
+export async function fetchActiveOscillationStructures(
+  symbol: string,
+  intervals: Interval[] = ["4h", "1h", "30m", "15m", "5m", "1m"],
+): Promise<ActiveOscillationStructure[]> {
+  const q = intervals.join(",");
+  return await marketApiGet<ActiveOscillationStructure[]>(
+    `/trend/oscillation/active?symbol=${encodeURIComponent(symbol)}&intervals=${encodeURIComponent(q)}`,
+  );
 }
 
 export function parseIsoAsUtcMs(s: string): number {
@@ -17,7 +44,7 @@ export function parseIsoAsUtcMs(s: string): number {
 }
 
 export async function fetchMarketKlines(symbol: string, interval: Interval, limit = 1500): Promise<StreamCandle[]> {
-  const rows = await apiGet<
+  const rows = await marketApiGet<
     {
       open_time: string;
       open_time_ms?: number;
@@ -29,6 +56,51 @@ export async function fetchMarketKlines(symbol: string, interval: Interval, limi
       boll_dn: number | null;
     }[]
   >(`/market/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}&ensure=true`);
+
+  const candles: StreamCandle[] = [];
+  for (const r of rows) {
+    const ms =
+      typeof r.open_time_ms === "number" && Number.isFinite(r.open_time_ms) && r.open_time_ms > 0
+        ? r.open_time_ms
+        : parseIsoAsUtcMs(r.open_time);
+    if (!Number.isFinite(ms)) continue;
+    candles.push({
+      symbol,
+      open_time_ms: ms,
+      close_time_ms: ms,
+      open: r.open,
+      high: r.high,
+      low: r.low,
+      close: r.close,
+      boll_up: r.boll_up,
+      boll_dn: r.boll_dn,
+    });
+  }
+  return candles;
+}
+
+export async function fetchMarketKlinesBefore(
+  symbol: string,
+  interval: Interval,
+  beforeOpenTimeMs: number,
+  limit = 1500,
+): Promise<StreamCandle[]> {
+  const before = Number(beforeOpenTimeMs);
+  if (!Number.isFinite(before) || before <= 0) return [];
+  const rows = await marketApiGet<
+    {
+      open_time: string;
+      open_time_ms?: number;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      boll_up: number | null;
+      boll_dn: number | null;
+    }[]
+  >(
+    `/market/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}&before_ms=${before}&ensure=true`,
+  );
 
   const candles: StreamCandle[] = [];
   for (const r of rows) {

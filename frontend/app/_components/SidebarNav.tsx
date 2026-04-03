@@ -10,7 +10,6 @@ type NavItem = {
 
 const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "首页" },
-  { href: "/market", label: "行情" },
   { href: "/trade", label: "交易" },
   { href: "/trend", label: "趋势" },
   { href: "/api", label: "API" },

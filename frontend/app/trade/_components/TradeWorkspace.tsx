@@ -17,12 +17,14 @@ function wsLabel(s: "connecting" | "open" | "closed") {
 export function TradeWorkspace() {
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [interval, setInterval] = useState<Interval>("1m");
+  const [showKeyPoints, setShowKeyPoints] = useState(true);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
 
   const { lastPrice, tickPrice, tickTimeMs, wsBackend, wsBinanceK, wsBinanceT, binanceError } = useTradeMarket(
     symbol,
     interval,
     chartContainerRef,
+    { showKeyPoints },
   );
 
   const [accounts, setAccounts] = useState<TradingAccount[]>([]);
@@ -246,6 +248,15 @@ export function TradeWorkspace() {
                 </button>
               ))}
             </div>
+
+            <label className="flex items-center gap-2 rounded-lg border border-white/10 bg-[#0b0e11] px-2 py-1.5 text-xs text-white/70">
+              <input
+                type="checkbox"
+                checked={showKeyPoints}
+                onChange={(e) => setShowKeyPoints(e.target.checked)}
+              />
+              关键点
+            </label>
           </div>
 
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-white/55 sm:text-xs">

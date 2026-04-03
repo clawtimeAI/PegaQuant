@@ -8,6 +8,7 @@ import {
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
+  type LineWidth,
   type UTCTimestamp,
 } from "lightweight-charts";
 import { BOLL_PERIOD } from "../_lib/config";
@@ -35,6 +36,7 @@ export class TradeChartEngine {
   private symbol: string;
   private interval: Interval;
   private callbacks: ChartDisplayCallbacks;
+  private showBoll: boolean;
 
   private chart: IChartApi | null = null;
   private candle: ISeriesApi<"Candlestick"> | null = null;
@@ -43,6 +45,11 @@ export class TradeChartEngine {
   private lineMb: ISeriesApi<"Line"> | null = null;
   private lineDn: ISeriesApi<"Line"> | null = null;
   private priceLine: IPriceLine | null = null;
+  private oscLines: IPriceLine[] = [];
+  private onNeedMoreHistory: ((beforeOpenTimeMs: number) => void) | null = null;
+  private firstOpenTimeMs: number | null = null;
+  private lastNeedMoreAt: number = 0;
+  private visibleRangeHandler: ((range: { from: number; to: number } | null) => void) | null = null;
   private ro: ResizeObserver | null = null;
 
   private lastCandle: LastCandle | null = null;
@@ -52,10 +59,16 @@ export class TradeChartEngine {
   private lastPriceRaf: number | null = null;
   private pendingLastPrice: number | null = null;
 
-  constructor(symbol: string, interval: Interval, callbacks: ChartDisplayCallbacks = {}) {
+  constructor(
+    symbol: string,
+    interval: Interval,
+    callbacks: ChartDisplayCallbacks = {},
+    options: { showBoll?: boolean } = {},
+  ) {
     this.symbol = symbol;
     this.interval = interval;
     this.callbacks = callbacks;
+    this.showBoll = options.showBoll ?? true;
   }
 
   setContext(symbol: string, interval: Interval) {
@@ -89,7 +102,7 @@ export class TradeChartEngine {
         vertLines: { color: "rgba(255,255,255,0.06)" },
         horzLines: { color: "rgba(255,255,255,0.06)" },
       },
-      crosshair: { mode: CrosshairMode.Magnet },
+      crosshair: { mode: CrosshairMode.Normal },
       localization: {
         locale: "zh-CN",
         dateFormat: "yyyy-MM-dd",
@@ -113,18 +126,21 @@ export class TradeChartEngine {
       priceFormat: { type: "volume" },
     });
 
-    const up = chart.addSeries(LineSeries, { color: "rgba(137,207,240,0.95)", lineWidth: 1 });
-    const mb = chart.addSeries(LineSeries, { color: "rgba(220,220,220,0.7)", lineWidth: 1 });
-    const dn = chart.addSeries(LineSeries, { color: "rgba(255,127,80,0.95)", lineWidth: 1 });
-
     vol.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0.0 } });
 
     this.chart = chart;
     this.candle = candle;
     this.vol = vol;
-    this.lineUp = up;
-    this.lineMb = mb;
-    this.lineDn = dn;
+    if (this.showBoll) {
+      const bollOpts = { lineWidth: 1 as const, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+      this.lineUp = chart.addSeries(LineSeries, { ...bollOpts, color: "rgba(137,207,240,0.95)" });
+      this.lineMb = chart.addSeries(LineSeries, { ...bollOpts, color: "rgba(220,220,220,0.7)" });
+      this.lineDn = chart.addSeries(LineSeries, { ...bollOpts, color: "rgba(255,127,80,0.95)" });
+    } else {
+      this.lineUp = null;
+      this.lineMb = null;
+      this.lineDn = null;
+    }
 
     this.ro = new ResizeObserver((entries) => {
       const entry = entries[0];
@@ -132,9 +148,30 @@ export class TradeChartEngine {
       chart.applyOptions({ width: Math.floor(entry.contentRect.width) });
     });
     this.ro.observe(container);
+
+    this.visibleRangeHandler = (range) => {
+      if (!range) return;
+      const cb = this.onNeedMoreHistory;
+      const before = this.firstOpenTimeMs;
+      if (!cb || before == null) return;
+      if (range.from > 10) return;
+      const now = Date.now();
+      if (now - this.lastNeedMoreAt < 800) return;
+      this.lastNeedMoreAt = now;
+      cb(before);
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(this.visibleRangeHandler);
   }
 
   dispose() {
+    if (this.chart && this.visibleRangeHandler) {
+      try {
+        this.chart.timeScale().unsubscribeVisibleLogicalRangeChange(this.visibleRangeHandler);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.visibleRangeHandler = null;
     this.ro?.disconnect();
     this.ro = null;
     this.chart?.remove();
@@ -145,6 +182,10 @@ export class TradeChartEngine {
     this.lineMb = null;
     this.lineDn = null;
     this.priceLine = null;
+    this.oscLines = [];
+    this.onNeedMoreHistory = null;
+    this.firstOpenTimeMs = null;
+    this.lastNeedMoreAt = 0;
     this.lastCandle = null;
     this.lastSeriesTime = null;
     this.closeHistory = [];
@@ -155,10 +196,11 @@ export class TradeChartEngine {
     this.pendingLastPrice = null;
   }
 
-  private removeAllPriceLines() {
+  private removeLastPriceLine() {
     const series = this.candle;
     if (!series) return;
-    for (const pl of series.priceLines()) {
+    const pl = this.priceLine;
+    if (pl) {
       try {
         series.removePriceLine(pl);
       } catch {
@@ -166,6 +208,19 @@ export class TradeChartEngine {
       }
     }
     this.priceLine = null;
+  }
+
+  private removeOscLines() {
+    const series = this.candle;
+    if (!series) return;
+    for (const pl of this.oscLines) {
+      try {
+        series.removePriceLine(pl);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.oscLines = [];
   }
 
   private scheduleLastPriceUi(price: number) {
@@ -191,22 +246,26 @@ export class TradeChartEngine {
         this.priceLine = null;
       }
     }
-    this.removeAllPriceLines();
+    this.removeLastPriceLine();
     this.priceLine = series.createPriceLine({
       price,
       color: "rgba(255,215,0,0.9)",
       lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
+      lineStyle: LineStyle.Solid,
       axisLabelVisible: true,
       title: "",
     });
   }
 
-  applySnapshot(candles: StreamCandle[]) {
+  setNeedMoreHistoryHandler(cb: ((beforeOpenTimeMs: number) => void) | null) {
+    this.onNeedMoreHistory = cb;
+  }
+
+  applySnapshot(candles: StreamCandle[], options: { fitContent?: boolean; keepRangeOffset?: number } = {}) {
     const series = this.candle;
     if (!series) return;
 
-    this.removeAllPriceLines();
+    this.removeLastPriceLine();
 
     const cData = candles.map((c) => ({
       time: Math.floor(c.open_time_ms / 1000) as UTCTimestamp,
@@ -216,7 +275,20 @@ export class TradeChartEngine {
       close: Number(c.close),
     }));
 
+    const keep = options.fitContent === false ? this.chart?.timeScale().getVisibleLogicalRange() ?? null : null;
     series.setData(cData);
+    if (keep && this.chart) {
+      try {
+        const shift = Number(options.keepRangeOffset ?? 0);
+        if (Number.isFinite(shift) && shift !== 0) {
+          this.chart.timeScale().setVisibleLogicalRange({ from: keep.from + shift, to: keep.to + shift });
+        } else {
+          this.chart.timeScale().setVisibleLogicalRange(keep);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
 
     if (cData.length > 0) {
       const last = cData[cData.length - 1]!;
@@ -224,27 +296,33 @@ export class TradeChartEngine {
       this.lastSeriesTime = Number(last.time);
       this.callbacks.onLastPrice?.(last.close);
       this.updatePriceLine(last.close);
+      this.firstOpenTimeMs = candles[0] ? Number(candles[0].open_time_ms) : null;
     } else {
       this.lastCandle = null;
       this.lastSeriesTime = null;
+      this.firstOpenTimeMs = null;
     }
 
-    const upData: { time: UTCTimestamp; value: number }[] = [];
-    const mbData: { time: UTCTimestamp; value: number }[] = [];
-    const dnData: { time: UTCTimestamp; value: number }[] = [];
     const closes: number[] = [];
-    for (const c of cData) {
-      closes.push(c.close);
-      const b = computeBollFromCloses(closes);
-      if (!b) continue;
-      upData.push({ time: c.time, value: b.up });
-      mbData.push({ time: c.time, value: b.mb });
-      dnData.push({ time: c.time, value: b.dn });
+    if (this.showBoll && this.lineUp && this.lineMb && this.lineDn) {
+      const upData: { time: UTCTimestamp; value: number }[] = [];
+      const mbData: { time: UTCTimestamp; value: number }[] = [];
+      const dnData: { time: UTCTimestamp; value: number }[] = [];
+      for (const c of cData) {
+        closes.push(c.close);
+        const b = computeBollFromCloses(closes);
+        if (!b) continue;
+        upData.push({ time: c.time, value: b.up });
+        mbData.push({ time: c.time, value: b.mb });
+        dnData.push({ time: c.time, value: b.dn });
+      }
+      this.lineUp.setData(upData);
+      this.lineMb.setData(mbData);
+      this.lineDn.setData(dnData);
+    } else {
+      for (const c of cData) closes.push(c.close);
     }
     this.closeHistory = closes;
-    this.lineUp?.setData(upData);
-    this.lineMb?.setData(mbData);
-    this.lineDn?.setData(dnData);
 
     const vData = candles.map((c) => ({
       time: Math.floor(c.open_time_ms / 1000) as UTCTimestamp,
@@ -253,7 +331,54 @@ export class TradeChartEngine {
     }));
     this.vol?.setData(vData);
 
-    this.chart?.timeScale().fitContent();
+    if (options.fitContent !== false) {
+      this.chart?.timeScale().fitContent();
+    }
+  }
+
+  setOscillationKeyPriceLines(input: { interval: Interval; price: number }[]) {
+    const series = this.candle;
+    if (!series) return;
+    this.removeOscLines();
+
+    const styleByInterval: Record<Interval, { color: string; width: LineWidth }> = {
+      "4h": { color: "rgba(186,85,211,1)", width: 4 },
+      "1h": { color: "rgba(64,156,255,1)", width: 3 },
+      "30m": { color: "rgba(14,203,129,0.95)", width: 3 },
+      "15m": { color: "rgba(255,215,0,0.95)", width: 2 },
+      "5m": { color: "rgba(255,127,80,0.9)", width: 2 },
+      "1m": { color: "rgba(246,70,93,0.9)", width: 2 },
+    };
+
+    const order: Interval[] = ["4h", "1h", "30m", "15m", "5m", "1m"];
+    const grouped = new Map<Interval, number[]>();
+    for (const itv of order) grouped.set(itv, []);
+    for (const r of input) {
+      if (!Number.isFinite(r.price)) continue;
+      const arr = grouped.get(r.interval);
+      if (!arr) continue;
+      arr.push(r.price);
+    }
+
+    for (const itv of order) {
+      const prices = grouped.get(itv) ?? [];
+      const seen = new Set<string>();
+      for (const p of prices) {
+        const key = p.toFixed(6);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const st = styleByInterval[itv];
+        const pl = series.createPriceLine({
+          price: p,
+          color: st.color,
+          lineWidth: st.width,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: itv,
+        });
+        this.oscLines.push(pl);
+      }
+    }
   }
 
   applyStream(c: StreamCandle) {
@@ -294,6 +419,16 @@ export class TradeChartEngine {
     this.updatePriceLine(next.close);
 
     try {
+      if (!this.showBoll || !this.lineUp || !this.lineMb || !this.lineDn) {
+        if (this.vol && c.volume != null) {
+          this.vol.update({
+            time: t,
+            value: Number(c.volume ?? 0),
+            color: Number(c.close) >= Number(c.open) ? "rgba(14,203,129,0.35)" : "rgba(246,70,93,0.35)",
+          });
+        }
+        return;
+      }
       const closes = this.closeHistory;
       if (last && next.time === last.time) {
         if (closes.length > 0) closes[closes.length - 1] = next.close;
@@ -305,9 +440,9 @@ export class TradeChartEngine {
       }
       const b = computeBollFromCloses(closes);
       if (b) {
-        this.lineUp?.update({ time: t, value: b.up });
-        this.lineMb?.update({ time: t, value: b.mb });
-        this.lineDn?.update({ time: t, value: b.dn });
+        this.lineUp.update({ time: t, value: b.up });
+        this.lineMb.update({ time: t, value: b.mb });
+        this.lineDn.update({ time: t, value: b.dn });
       }
 
       if (this.vol && c.volume != null) {

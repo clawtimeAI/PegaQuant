@@ -4,6 +4,8 @@ import {
   ensureCurrentPeriodTail,
   fetchBinanceLatestKline,
   fetchBinanceTickerPrice,
+  fetchActiveOscillationStructures,
+  fetchMarketKlinesBefore,
   fetchMarketKlines,
   mergeLatestOpenKlineFromExchange,
 } from "../_lib/api";
@@ -13,21 +15,33 @@ import { isRecord } from "../_lib/record";
 import type { Interval } from "../_lib/types";
 import type { StreamCandle } from "../_lib/types";
 
+const TICK_SOURCE = process.env.NEXT_PUBLIC_TICK_SOURCE ?? "binance";
+const KLINE_SOURCE = process.env.NEXT_PUBLIC_KLINE_SOURCE ?? "binance";
+
 type WsStatus = "connecting" | "open" | "closed";
 
 /**
  * 图表挂载、历史加载、后端 WS、币安 K/成交 WS 的统一编排。
  * 设计要点：引擎实例与 DOM 同生命周期；币安 K 连通时跳过后端 kline_stream，避免回退覆盖最后一根。
  */
-export function useTradeMarket(symbol: string, interval: Interval, containerRef: RefObject<HTMLDivElement | null>) {
+export function useTradeMarket(
+  symbol: string,
+  interval: Interval,
+  containerRef: RefObject<HTMLDivElement | null>,
+  options: { showBoll?: boolean; showKeyPoints?: boolean } = {},
+) {
   const engineRef = useRef<TradeChartEngine | null>(null);
+  const snapshotRef = useRef<StreamCandle[]>([]);
+  const loadingMoreRef = useRef(false);
+  const showBoll = options.showBoll ?? true;
+  const showKeyPoints = options.showKeyPoints ?? true;
 
   const [lastPrice, setLastPrice] = useState<number | null>(null);
   const [tickPrice, setTickPrice] = useState<number | null>(null);
   const [tickTimeMs, setTickTimeMs] = useState<number | null>(null);
   const [wsBackend, setWsBackend] = useState<WsStatus>("connecting");
-  const [wsBinanceK, setWsBinanceK] = useState<WsStatus>("connecting");
-  const [wsBinanceT, setWsBinanceT] = useState<WsStatus>("connecting");
+  const [wsBinanceK, setWsBinanceK] = useState<WsStatus>(() => (KLINE_SOURCE === "binance" ? "connecting" : "closed"));
+  const [wsBinanceT, setWsBinanceT] = useState<WsStatus>(() => (TICK_SOURCE === "binance" ? "connecting" : "closed"));
   const [binanceError, setBinanceError] = useState("");
 
   const binanceKlineLiveRef = useRef(false);
@@ -71,15 +85,39 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
         setTickPrice(p);
         setTickTimeMs(ts);
       },
-    });
+    }, { showBoll });
     engine.mount(el);
+    engine.setNeedMoreHistoryHandler((beforeOpenTimeMs) => {
+      const eng = engineRef.current;
+      if (!eng) return;
+      if (loadingMoreRef.current) return;
+      const curr = snapshotRef.current;
+      if (!curr.length) return;
+      if (Number(curr[0]!.open_time_ms) !== Number(beforeOpenTimeMs)) return;
+      loadingMoreRef.current = true;
+      fetchMarketKlinesBefore(symbol, interval, beforeOpenTimeMs, 1500)
+        .then((older) => {
+          if (!older.length) return;
+          const first = curr[0]!.open_time_ms;
+          let end = older.length - 1;
+          while (end >= 0 && older[end]!.open_time_ms >= first) end--;
+          if (end < 0) return;
+          const trimmed = older.slice(0, end + 1);
+          const next = [...trimmed, ...curr];
+          snapshotRef.current = next;
+          eng.applySnapshot(next, { fitContent: false, keepRangeOffset: trimmed.length });
+        })
+        .finally(() => {
+          loadingMoreRef.current = false;
+        });
+    });
     engineRef.current = engine;
 
     return () => {
       engine.dispose();
       engineRef.current = null;
     };
-  }, [symbol, interval, containerRef]);
+  }, [symbol, interval, containerRef, showBoll]);
 
   /** symbol / interval 变化时同步引擎上下文（新引擎已在 layout 里创建，此项兜底若以后复用单例） */
   useEffect(() => {
@@ -101,23 +139,56 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
         (merged.length > 0 ? Number(merged[merged.length - 1]!.close) : null);
       merged = ensureCurrentPeriodTail(merged, symbol, interval, seed);
 
+      snapshotRef.current = merged;
       engine.applySnapshot(merged);
     },
     [interval, symbol],
   );
 
+  const refreshOscillationLines = useCallback(async () => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    if (!showKeyPoints) {
+      engine.setOscillationKeyPriceLines([]);
+      return;
+    }
+    try {
+      const rows = await fetchActiveOscillationStructures(symbol, ["4h", "1h", "30m", "15m", "5m", "1m"]);
+      const levels: { interval: Interval; price: number }[] = [];
+      for (const r of rows) {
+        const itv = r.interval;
+        const xs = Array.isArray(r.x_points) ? r.x_points : [];
+        const ys = Array.isArray(r.y_points) ? r.y_points : [];
+        const tail = (arr: { price: number }[]) => arr.slice(Math.max(0, arr.length - 6));
+        for (const p of tail(xs)) levels.push({ interval: itv, price: Number(p.price) });
+        for (const p of tail(ys)) levels.push({ interval: itv, price: Number(p.price) });
+      }
+      engine.setOscillationKeyPriceLines(levels);
+    } catch {
+      engine.setOscillationKeyPriceLines([]);
+    }
+  }, [showKeyPoints, symbol]);
+
   const loadHttpSnapshot = useCallback(async () => {
     try {
       const rows = await fetchMarketKlines(symbol, interval);
       await applySnapshotMerged(rows);
+      await refreshOscillationLines();
     } catch {
       /* 静默；图表可能由 WS 引导 */
     }
-  }, [applySnapshotMerged, interval, symbol]);
+  }, [applySnapshotMerged, interval, refreshOscillationLines, symbol]);
 
   useEffect(() => {
     void loadHttpSnapshot();
   }, [loadHttpSnapshot]);
+
+  useEffect(() => {
+    void refreshOscillationLines();
+    if (!showKeyPoints) return;
+    const timer = setInterval(() => void refreshOscillationLines(), 60_000);
+    return () => clearInterval(timer);
+  }, [refreshOscillationLines, showKeyPoints]);
 
   const sendSub = useCallback((ws: WebSocket, s: string, itv: Interval) => {
     ws.send(JSON.stringify({ type: "subscribe_kline", symbols: [s], intervals: [itv] }));
@@ -163,6 +234,15 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
         const data = obj["data"];
         if (!isRecord(data)) return;
         engineRef.current?.applyStream(data as unknown as StreamCandle);
+        return;
+      }
+      if (t === "tick") {
+        const s = String(obj["symbol"] ?? "").trim().toUpperCase();
+        if (s !== symbol) return;
+        const p = Number(obj["price"] ?? NaN);
+        const ts = Number(obj["time_ms"] ?? Date.now());
+        if (!Number.isFinite(p) || !Number.isFinite(ts)) return;
+        engineRef.current?.applyTick(p, ts);
       }
     };
 
@@ -285,9 +365,20 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
   }, [connectBinanceKline]);
 
   useEffect(() => {
+    if (KLINE_SOURCE !== "binance") {
+      binanceKlineLiveRef.current = false;
+      const w = binanceKlineRef.current;
+      binanceKlineRef.current = null;
+      if (w) {
+        binanceKManualCloseRef.current = true;
+        w.close();
+      }
+      return undefined;
+    }
     const t = setTimeout(() => connectBinanceKline(), 0);
     const rec = binanceKReconnectRef.current;
     return () => {
+      if (KLINE_SOURCE !== "binance") return;
       clearTimeout(t);
       if (rec.timer != null) clearTimeout(rec.timer);
       rec.timer = null;
@@ -363,9 +454,11 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
   }, [connectBinanceTrade]);
 
   useEffect(() => {
+    if (TICK_SOURCE !== "binance") return;
     const t = setTimeout(() => connectBinanceTrade(), 0);
     const rec = binanceTradeReconnectRef.current;
     return () => {
+      if (TICK_SOURCE !== "binance") return;
       clearTimeout(t);
       if (rec.timer != null) clearTimeout(rec.timer);
       rec.timer = null;
@@ -381,6 +474,7 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
 
   /** 成交 WS 不通时用 ticker 轮询兜底 tick */
   useEffect(() => {
+    if (TICK_SOURCE !== "binance") return;
     if (wsBinanceT !== "closed") return;
     let stopped = false;
     const tick = async () => {

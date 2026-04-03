@@ -1,9 +1,9 @@
 import type { Interval } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000/api";
+export const MARKET_API_BASE = process.env.NEXT_PUBLIC_MARKET_API_BASE ?? "http://localhost:8787";
 export const WS_BASE =
-  process.env.NEXT_PUBLIC_WS_BASE ??
-  API_BASE.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/api\/?$/, "");
+  process.env.NEXT_PUBLIC_WS_BASE ?? process.env.NEXT_PUBLIC_MARKET_WS_BASE ?? "ws://localhost:8383";
 
 export const BOLL_PERIOD = 400;
 export const BOLL_MULT = 2;

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     binance_usdm_base_url: str = "https://fapi.binance.com"
     binance_recv_window: int = 5000
 
+    enable_kline_stream_service: bool = False
     kline_upstream_ws_url: str = "ws://127.0.0.1:8383"
     kline_symbols: str = "BTCUSDT"
     kline_intervals: str = "1m,5m,15m,30m,1h,4h"

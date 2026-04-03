@@ -1,0 +1,28 @@
+后端启动运行后，主要在做两类事情： 常驻后台任务 + 对外提供 API/WS 服务 。
+
+常驻后台任务（启动即运行）
+
+- K线流服务 ：启动时创建并运行 KlineStreamService ，在 main.py 的 startup 里 create_task(svc.start())
+  - 连接上游 settings.kline_upstream_ws_url （默认 ws://127.0.0.1:8383 ）并订阅配置的 symbols/intervals ，持续接收 kline_stream/kline_sync
+  - 在内存里维护每个 symbol+interval 的 CandleBuffer （最多 kline_buffer_size=1500 ）
+  - 对最新K线计算 BOLL(400,2) （服务内按 kline_boll_period 计算）
+  - 当收到“收盘确认”的K线（ is_final=True ）时：
+    - 写入数据库（upsert）并裁剪旧数据
+    - 触发一次 震荡结构识别引擎 run_oscillation_engine
+对外服务（请求触发）
+
+- WebSocket：/ws/klines ：在 main.py
+  - 前端发 subscribe_kline/unsubscribe_kline 后，服务把对应 symbol/interval 的 快照 和 增量K线 推给客户端
+- Market 行情接口 ： market.py
+  - GET /api/market/klines ：从数据库读K线；可选 ensure=true 时会先走币安 REST /fapi/v1/klines 拉最新并写库（ sync_symbol_interval ）
+- Binance 账户管理/查询 ： binance.py
+  - 账户列表/新增/启用禁用/删除（API Secret 会用 crypto_service 加密后存库）
+  - 查询账户信息、持仓、成交、收入、订单等（调用币安签名接口）
+  - 调试出口 IP： GET /api/binance/debug/egress-ip （用于核对币安 API key 白名单）
+- Trade 下单/平仓/杠杆 ： trade.py
+  - POST /api/trade/order/market ：市价开仓，并可选同时下 TP/SL（reduceOnly/closePosition）
+  - POST /api/trade/position/close ：按比例一键平仓
+  - POST /api/trade/leverage ：设置合约杠杆
+- Trend（震荡结构） ： trend.py
+  - 查询结构列表/详情
+  - POST /api/trend/run ：手动触发一次震荡引擎跑历史/补算
