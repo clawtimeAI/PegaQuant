@@ -29,12 +29,24 @@ class ClosePositionIn(BaseModel):
     pct: float = Field(1.0, ge=0.0, le=1.0)
 
 
+class LeverageIn(BaseModel):
+    account_id: int
+    symbol: str
+    leverage: int = Field(..., ge=1, le=125)
+
+
 @router.post("/order/market")
 def place_market_order(body: MarketOrderIn, db: Session = Depends(get_db)):
     acc = get_trading_account(db, owner_user_id=1, account_id=body.account_id)
     if acc is None or not acc.is_active:
         raise HTTPException(status_code=404, detail="account not found or inactive")
     client = BinanceUSDMClient(api_key=acc.api_key, api_secret=decrypt_secret(acc.encrypted_secret))
+
+    if body.leverage is not None and body.leverage > 0:
+        try:
+            client.change_leverage(symbol=body.symbol, leverage=int(body.leverage))
+        except BinanceUSDMError as e:
+            raise HTTPException(status_code=400, detail=f"set_leverage_failed: {e.body}") from None
 
     try:
         order = client.order_create(symbol=body.symbol, side=body.side, type="MARKET", quantity=body.qty)
@@ -132,3 +144,17 @@ def close_position(body: ClosePositionIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=e.body) from None
 
     return {"ok": True, "symbol": body.symbol, "side": side, "qty": qty, "order": order}
+
+
+@router.post("/leverage")
+def set_leverage(body: LeverageIn, db: Session = Depends(get_db)):
+    acc = get_trading_account(db, owner_user_id=1, account_id=body.account_id)
+    if acc is None or not acc.is_active:
+        raise HTTPException(status_code=404, detail="account not found or inactive")
+
+    client = BinanceUSDMClient(api_key=acc.api_key, api_secret=decrypt_secret(acc.encrypted_secret))
+    try:
+        data = client.change_leverage(symbol=body.symbol.upper(), leverage=body.leverage)
+    except BinanceUSDMError as e:
+        raise HTTPException(status_code=400, detail=e.body) from None
+    return {"ok": True, "result": data}

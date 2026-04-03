@@ -12,6 +12,7 @@ import {
 } from "lightweight-charts";
 import { BOLL_PERIOD } from "../_lib/config";
 import { computeBollFromCloses } from "../_lib/boll";
+import { chartTickMarkFormatterBeijing, chartTimeFormatterBeijing } from "../_lib/chartBeijingTime";
 import { intervalMs } from "../_lib/intervalMs";
 import type { Interval } from "../_lib/types";
 import type { StreamCandle } from "../_lib/types";
@@ -80,13 +81,20 @@ export class TradeChartEngine {
         borderVisible: false,
         timeVisible: true,
         secondsVisible: false,
+        tickMarkFormatter: chartTickMarkFormatterBeijing,
+        /** 最后一根 K 与图表右边缘保留空隙（像素），避免贴边 */
+        rightOffsetPixels: 96,
       },
       grid: {
         vertLines: { color: "rgba(255,255,255,0.06)" },
         horzLines: { color: "rgba(255,255,255,0.06)" },
       },
       crosshair: { mode: CrosshairMode.Magnet },
-      localization: { locale: "zh-CN" },
+      localization: {
+        locale: "zh-CN",
+        dateFormat: "yyyy-MM-dd",
+        timeFormatter: chartTimeFormatterBeijing,
+      },
     });
 
     const candle = chart.addSeries(CandlestickSeries, {
@@ -122,7 +130,6 @@ export class TradeChartEngine {
       const entry = entries[0];
       if (!entry) return;
       chart.applyOptions({ width: Math.floor(entry.contentRect.width) });
-      chart.timeScale().fitContent();
     });
     this.ro.observe(container);
   }
@@ -267,8 +274,6 @@ export class TradeChartEngine {
     const last = this.lastCandle;
     if (last && next.time < last.time) return;
 
-    const isNewCandle = !last || next.time > last.time;
-
     try {
       const hasBars = series.data().length > 0;
       if (last && next.time === last.time) {
@@ -316,9 +321,6 @@ export class TradeChartEngine {
       /* 布林/量失败不影响 K 线 */
     }
 
-    if (isNewCandle) {
-      this.chart?.timeScale().scrollToRealTime();
-    }
   }
 
   /** 用成交时间戳推进当前周期 OHLC（与币安 K 流互补） */

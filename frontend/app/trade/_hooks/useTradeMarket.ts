@@ -182,9 +182,10 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
   }, [connectBackendWs]);
 
   useEffect(() => {
-    connectBackendWs();
+    const t = setTimeout(() => connectBackendWs(), 0);
     const rec = reconnectRef.current;
     return () => {
+      clearTimeout(t);
       if (rec.timer != null) clearTimeout(rec.timer);
       rec.timer = null;
       rec.backoffMs = 800;
@@ -284,9 +285,10 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
   }, [connectBinanceKline]);
 
   useEffect(() => {
-    connectBinanceKline();
+    const t = setTimeout(() => connectBinanceKline(), 0);
     const rec = binanceKReconnectRef.current;
     return () => {
+      clearTimeout(t);
       if (rec.timer != null) clearTimeout(rec.timer);
       rec.timer = null;
       rec.backoffMs = 800;
@@ -361,9 +363,10 @@ export function useTradeMarket(symbol: string, interval: Interval, containerRef:
   }, [connectBinanceTrade]);
 
   useEffect(() => {
-    connectBinanceTrade();
+    const t = setTimeout(() => connectBinanceTrade(), 0);
     const rec = binanceTradeReconnectRef.current;
     return () => {
+      clearTimeout(t);
       if (rec.timer != null) clearTimeout(rec.timer);
       rec.timer = null;
       rec.backoffMs = 800;

@@ -228,3 +228,11 @@ class BinanceUSDMClient:
         if position_side is not None:
             params["positionSide"] = position_side
         return self.request("POST", "/fapi/v1/order", params=params, signed=True)
+
+    def change_leverage(self, *, symbol: str, leverage: int) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            "/fapi/v1/leverage",
+            params={"symbol": symbol, "leverage": int(leverage)},
+            signed=True,
+        )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import urllib.request
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -181,3 +183,28 @@ def orders(
         )
     except BinanceUSDMError as e:
         raise HTTPException(status_code=400, detail=e.body) from None
+
+
+@router.get("/debug/egress-ip")
+def debug_egress_ipv4():
+    """
+    本后端进程访问公网时的出口 IPv4（与请求 fapi.binance.com 时一致，用于核对币安 API 白名单）。
+    若开启「限制可访问的 IP」，此处 IP 必须与币安后台列表一致；云上部署时通常不是您本机浏览器 IP。
+    """
+    try:
+        req = urllib.request.Request(
+            "https://api.ipify.org?format=json",
+            headers={"User-Agent": "PegaQuant-Backend/1.0"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        ip = data.get("ip")
+        if not ip:
+            raise ValueError("empty ip")
+        return {
+            "ipv4": ip,
+            "hint_zh": "将此 IPv4 加入币安 API Key 的 IP 白名单；若在 Docker/WSL/云主机上跑后端，白名单填的是该环境的出口 IP。",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"egress_ip_lookup_failed: {e}") from None
