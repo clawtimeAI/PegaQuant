@@ -1,0 +1,115 @@
+新震荡结构识别规则（连续轨外结束 + 连续轨内确认首点）
+
+目标
+- 定义一种新的震荡结构“切换/起始”规则：用“连续 N 根收盘在轨外”结束旧结构，并以该段轨外极值作为新结构的首个关键点候选；待“连续 N 根收盘在轨内”后确认该首点。
+- 除上述差异外，X/Y 关键点（Xn/Yn）后续的确认与维护规则，与 OscillationEngine 完全一致，可直接复用。
+- 适用周期：1m / 5m / 15m / 30m / 1h / 4h。
+
+与 OscillationEngine 一致的部分（直接复用）
+1) 输入 K 线字段（逐根处理，时间升序、open_time 唯一）
+   - open_time
+   - high / low / close
+   - boll_up / boll_dn（建议与现有系统一致：BOLL(400,2)）
+
+2) 带内/带外判定（与现有系统一致）
+   - 在带内：boll_dn <= close <= boll_up（任一为 null 则认为不在带内）
+   - 下轨外：close < boll_dn
+   - 上轨外：close > boll_up
+
+3) 关键点（Point）数据结构（与现有系统一致）
+   - kind: "X"（低点）或 "Y"（高点）
+   - time: 该关键点归属 K 的 open_time
+   - price: X 用 low，Y 用 high（取该段极值）
+
+4) 数据落库与增量计算（与现有系统一致）
+   - 表：oscillation_structures
+   - status: ACTIVE / CLOSED
+   - x_points / y_points: 关键点序列
+   - engine_state: 引擎增量状态（必须持久化，否则只能全量重算）
+
+新逻辑差异点（本文件定义的新增/替换规则）
+
+参数
+- confirm_bars（默认 30）
+  - 用途 A：连续轨外结束旧结构的阈值
+  - 用途 B：连续轨内确认“新结构首个关键点”的阈值
+  - 用途 C：后续 Xn/Yn 的确认阈值（与 OscillationEngine 相同）
+
+核心概念
+- outside_streak：连续收盘在轨外的根数（close 在 boll 区间之外）
+- outside_side：当前轨外方向
+  - "UP"：close > boll_up
+  - "DN"：close < boll_dn
+- first_pending：新结构“首个关键点”的候选（来自轨外极值）
+  - 若 outside_side="UP"，候选 kind="Y"，price 取轨外期间最高 high
+  - 若 outside_side="DN"，候选 kind="X"，price 取轨外期间最低 low
+
+逐根 K 线处理流程（建议只喂已收盘 K，避免抖动）
+
+步骤 0：准备
+- 读取 symbol+interval 的 ACTIVE 结构与 engine_state
+- 从 last_processed_open_time 之后开始处理新 K
+
+步骤 1：连续轨外结束旧结构（替换原 BREAK_DUAL）
+对每根 K 线 row：
+1) 判断轨外方向 outside_side
+   - 若 boll_up/boll_dn 任一为 null：outside_side = null（不参与轨内/轨外计数）
+   - else if close > boll_up：outside_side = "UP"
+   - else if close < boll_dn：outside_side = "DN"
+   - else：outside_side = null（在轨内）
+
+2) 若 outside_side != null（收盘在轨外）
+   - 若 engine_state.outside_side 与 outside_side 不同：
+     - outside_streak = 1
+     - outside_side = 本次方向
+     - first_pending = 以本根作为起点初始化（UP 用 high，DN 用 low）
+   - 否则（同方向持续轨外）：
+     - outside_streak += 1
+     - 更新 first_pending 极值：
+       - UP：若 row.high 更高则更新 first_pending.time/price
+       - DN：若 row.low 更低则更新 first_pending.time/price
+
+3) 当 outside_streak >= confirm_bars：
+   - 关闭旧结构（status=CLOSED）
+     - end_time = row.open_time
+     - close_reason 建议：BREAK_OUTSIDE_N
+     - close_condition 建议包含：outside_side / confirm_bars / outside_streak / first_pending
+   - 创建新结构（status=ACTIVE）
+   - 将新结构置入“酝酿阶段”：
+     - first_pending 保留（作为新结构首个关键点候选）
+     - inband_count = 0
+     - x_points / y_points 清空（新结构重新开始）
+   - 继续处理后续 K（新结构从此处开始等待回带确认）
+
+步骤 2：连续轨内确认新结构首点（新增）
+当 outside_side == null（即 close 在轨内）且存在 first_pending：
+1) 若在轨内：inband_count += 1；否则（boll 为 null 或 close 不在轨内）：inband_count = 0
+2) 当 inband_count >= confirm_bars：
+   - 确认 first_pending 为新结构首个关键点：
+     - 若 first_pending.kind="X"：写入 x_points（作为 X1）
+     - 若 first_pending.kind="Y"：写入 y_points（作为 Y1）
+   - 清空 first_pending
+   - inband_count = 0
+   - 从这一刻起，后续关键点的确认与 OscillationEngine 完全一致（见步骤 3）
+
+步骤 3：后续 Xn/Yn 的确认（与 OscillationEngine 完全一致）
+- 原则：先捕捉“带外极值”为 pending，然后等待价格回到带内连续 N 根，确认 pending 为关键点
+- X 候选来自下穿下轨时的更低 low；Y 候选来自上穿上轨时的更高 high
+- pending 一旦出现，只有在 close 回到带内并连续满足 confirm_bars 才会被确认落为 Xn/Yn
+
+engine_state 建议字段（便于增量与回放）
+- last_processed_open_time: 上次处理到的 open_time
+- outside_side: "UP"|"DN"|null
+- outside_streak: int
+- first_pending: {kind,time,price} | null
+- inband_count: int
+- pending / inband_count（后续关键点确认用，与 OscillationEngine 保持一致）
+- confirm_bars: int（将参数落地，便于回放与排查）
+
+边界与约定（建议写死，避免歧义）
+1) “轨外持续 N 根”的判定使用 close（收盘）而非 high/low
+2) 若轨外方向发生切换（UP→DN 或 DN→UP），outside_streak 重新计数，并重置 first_pending
+3) 若 boll_up/boll_dn 为 null：
+   - 不参与轨内/轨外计数
+   - 不增加 outside_streak / inband_count
+   - 不更新 first_pending / pending

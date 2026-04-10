@@ -12,6 +12,9 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "首页" },
   { href: "/trade", label: "交易" },
   { href: "/trend", label: "趋势" },
+  { href: "/trend3", label: "趋势V3" },
+  { href: "/abc", label: "ABC" },
+  { href: "/backtest", label: "回测" },
   { href: "/api", label: "API" },
   { href: "/about", label: "关于" },
 ];

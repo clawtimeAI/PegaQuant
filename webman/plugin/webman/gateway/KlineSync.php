@@ -301,8 +301,8 @@ class KlineSync
                 ? $onboardDate
                 : (int)($latestOpenTimeMs * 1000 + $intervalMs);
         } else {
-            if ($interval === '1m') {
-                $threeDaysAgoMs = (int)((time() - 3 * 86400) * 1000);
+            if ($interval === '10m') {
+                $threeDaysAgoMs = (int)((time() - 30 * 86400) * 1000);
                 $startTime = max($onboardDate, $threeDaysAgoMs);
                 $startTime = $startTime - ($startTime % $intervalMs);
             } else {
@@ -365,7 +365,7 @@ class KlineSync
      * @return array K-line data
      * @throws \Exception
      */
-    private static function fetchKlines(string $symbol, string $interval, int $startTime): array
+    private static function fetchKlines(string $symbol, string $interval, int $startTime, ?int $endTime = null): array
     {
         $query = [
             'symbol' => $symbol,
@@ -373,6 +373,9 @@ class KlineSync
             'startTime' => $startTime,
             'limit' => self::$limit
         ];
+        if ($endTime !== null && $endTime > 0) {
+            $query['endTime'] = $endTime;
+        }
 
         $url = self::$apiUrl . '?' . http_build_query($query);
         $response = self::getData($url);
@@ -400,6 +403,81 @@ class KlineSync
         }
 
         return $candles;
+    }
+
+    private static function buildRowsWithBoll(string $symbol, array $candles, array &$prevSources): array
+    {
+        $rows = [];
+        foreach ($candles as $candle) {
+            if (!is_array($candle) || count($candle) < 12) {
+                continue;
+            }
+
+            $srcVal = (function ($c) {
+                $o = (float)$c[1];
+                $h = (float)$c[2];
+                $l = (float)$c[3];
+                $cl = (float)$c[4];
+                switch (self::$bollSource) {
+                    case 'hl2':
+                        return ($h + $l) / 2.0;
+                    case 'hlc3':
+                        return ($h + $l + $cl) / 3.0;
+                    case 'ohlc4':
+                        return ($o + $h + $l + $cl) / 4.0;
+                    default:
+                        return $cl;
+                }
+            })($candle);
+
+            $bollUp = null;
+            $bollMb = null;
+            $bollDn = null;
+            if (count($prevSources) >= self::$bollPeriod - 1) {
+                if (count($prevSources) > self::$bollPeriod - 1) {
+                    $prevSources = array_slice($prevSources, - (self::$bollPeriod - 1));
+                }
+                $window = $prevSources;
+                $window[] = $srcVal;
+                $sum = 0.0;
+                foreach ($window as $v) {
+                    $sum += $v;
+                }
+                $bollMb = $sum / self::$bollPeriod;
+                $varSum = 0.0;
+                foreach ($window as $v) {
+                    $d = $v - $bollMb;
+                    $varSum += $d * $d;
+                }
+                $stdDev = sqrt($varSum / self::$bollPeriod);
+                $bollUp = $bollMb + self::$bollStdDev * $stdDev;
+                $bollDn = $bollMb - self::$bollStdDev * $stdDev;
+            }
+
+            $rows[] = [
+                'symbol' => $symbol,
+                'open' => $candle[1],
+                'high' => $candle[2],
+                'low' => $candle[3],
+                'close' => $candle[4],
+                'volume' => $candle[5],
+                'amount' => $candle[7],
+                'num_trades' => $candle[8],
+                'buy_volume' => $candle[9],
+                'buy_amount' => $candle[10],
+                'open_time' => date('Y-m-d H:i:s', (int)($candle[0] / 1000)),
+                'close_time' => date('Y-m-d H:i:s', (int)($candle[6] / 1000)),
+                'boll_up' => $bollUp,
+                'boll_mb' => $bollMb,
+                'boll_dn' => $bollDn,
+            ];
+
+            $prevSources[] = $srcVal;
+        }
+        if (count($prevSources) > self::$bollPeriod - 1) {
+            $prevSources = array_slice($prevSources, - (self::$bollPeriod - 1));
+        }
+        return $rows;
     }
 
     private static function throttle(): void
@@ -548,6 +626,66 @@ class KlineSync
         ];
 
         return self::batchInsertKlines($table, $symbol, [$candle]);
+    }
+
+    public static function backfill(string $symbol, string $interval, int $startTimeMs, int $endTimeMs): array
+    {
+        $symbol = strtoupper(trim($symbol));
+        $interval = trim($interval);
+        if ($symbol === '' || !in_array($interval, self::$intervals, true)) {
+            throw new \InvalidArgumentException('invalid symbol or interval');
+        }
+        if ($startTimeMs <= 0 || $endTimeMs <= 0 || $endTimeMs <= $startTimeMs) {
+            throw new \InvalidArgumentException('invalid time window');
+        }
+
+        $table = "kline_$interval";
+        $intervalMs = self::intervalToMilliseconds($interval);
+        $startTimeMs = $startTimeMs - ($startTimeMs % $intervalMs);
+
+        $currentTimeMs = (int)(time() * 1000);
+        $lastClosedCandleCloseTime = $currentTimeMs - ($currentTimeMs % $intervalMs);
+        $endTimeMs = min($endTimeMs, $lastClosedCandleCloseTime);
+
+        $insertedCount = 0;
+        $prevSources = [];
+        while ($startTimeMs < $endTimeMs) {
+            $candles = self::fetchKlines($symbol, $interval, $startTimeMs, $endTimeMs);
+            if (empty($candles)) {
+                break;
+            }
+
+            $filtered = array_values(array_filter($candles, function ($c) use ($endTimeMs, $lastClosedCandleCloseTime) {
+                if (!is_array($c) || !isset($c[0], $c[6])) {
+                    return false;
+                }
+                return $c[0] < $endTimeMs && $c[6] <= $lastClosedCandleCloseTime;
+            }));
+            if (empty($filtered)) {
+                break;
+            }
+
+            $rows = self::buildRowsWithBoll($symbol, $filtered, $prevSources);
+            if (!empty($rows)) {
+                $updateColumns = ['open', 'high', 'low', 'close', 'volume', 'amount', 'num_trades', 'buy_volume', 'buy_amount', 'close_time', 'boll_up', 'boll_mb', 'boll_dn'];
+                Db::table($table)->upsert($rows, ['symbol', 'open_time'], $updateColumns);
+                $insertedCount += count($rows);
+            }
+
+            $last = end($filtered);
+            if (!is_array($last) || !isset($last[6])) {
+                break;
+            }
+            $startTimeMs = (int)($last[6] + 1);
+        }
+
+        return [
+            'symbol' => $symbol,
+            'interval' => $interval,
+            'inserted' => $insertedCount,
+            'start_ms' => $startTimeMs,
+            'end_ms' => $endTimeMs,
+        ];
     }
 
     /**

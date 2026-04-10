@@ -31,6 +31,24 @@ class OscillationStructureOut(BaseModel):
     updated_at: datetime
 
 
+class OscillationStructureV3Out(BaseModel):
+    id: int
+    symbol: str
+    interval: str
+    status: str
+    x_points: list[dict[str, Any]] = Field(default_factory=list)
+    y_points: list[dict[str, Any]] = Field(default_factory=list)
+    a_point: dict[str, Any] | None = None
+    episode: dict[str, Any] | None = None
+    close_reason: str | None = None
+    close_condition: dict[str, Any] | None = None
+    engine_state: dict[str, Any] | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class OscillationRunIn(BaseModel):
     symbol: str
     interval: Interval
@@ -39,6 +57,34 @@ class OscillationRunIn(BaseModel):
     confirm_bars: int | None = None
     break_pct: float | None = None
     break_extreme_pct: float | None = None
+
+
+class NewOscillationRunIn(BaseModel):
+    symbol: str
+    interval: Interval
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    confirm_bars: int | None = None
+
+
+class AbcStructureOut(BaseModel):
+    id: int
+    symbol: str
+    interval: str
+    status: str
+    direction: str | None = None
+    last_state: str | None = None
+    a_point: dict[str, Any] | None = None
+    a_confirm_time: datetime | None = None
+    b_points: list[dict[str, Any]] = Field(default_factory=list)
+    c_points: list[dict[str, Any]] = Field(default_factory=list)
+    close_reason: str | None = None
+    close_condition: dict[str, Any] | None = None
+    engine_state: dict[str, Any] | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class TradingAccountOut(BaseModel):

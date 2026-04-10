@@ -36,6 +36,8 @@ class OscillationEngine
 
         $xPoints = $active['x_points'];
         $yPoints = $active['y_points'];
+        $xPoints = self::normalizeAndLabelPoints($xPoints, 'X');
+        $yPoints = self::normalizeAndLabelPoints($yPoints, 'Y');
         $state = $active['engine_state'] ?? [];
         $pending = $state['pending'] ?? null;
         $inbandCount = isset($state['inband_count']) ? (int)$state['inband_count'] : 0;
@@ -112,8 +114,10 @@ class OscillationEngine
                             'kind' => (string)$pending['kind'],
                         ];
                         if ($point['kind'] === 'X') {
+                            $point['label'] = 'X' . (string)(count($xPoints) + 1);
                             $xPoints[] = $point;
                         } else {
+                            $point['label'] = 'Y' . (string)(count($yPoints) + 1);
                             $yPoints[] = $point;
                         }
                         $updatedPoints++;
@@ -140,6 +144,8 @@ class OscillationEngine
             'break_extreme_pct' => $breakExtremePct,
         ];
 
+        $xPoints = self::normalizeAndLabelPoints($xPoints, 'X');
+        $yPoints = self::normalizeAndLabelPoints($yPoints, 'Y');
         self::saveActiveStructure(
             (int)$active['id'],
             $xPoints,
@@ -249,6 +255,8 @@ class OscillationEngine
         array $engineState,
         ?string $startTime
     ): void {
+        $xPoints = self::normalizeAndLabelPoints($xPoints, 'X');
+        $yPoints = self::normalizeAndLabelPoints($yPoints, 'Y');
         Db::table('oscillation_structures')
             ->where('id', $id)
             ->update([
@@ -271,6 +279,8 @@ class OscillationEngine
         array $engineState,
         ?string $startTime
     ): void {
+        $xPoints = self::normalizeAndLabelPoints($xPoints, 'X');
+        $yPoints = self::normalizeAndLabelPoints($yPoints, 'Y');
         Db::table('oscillation_structures')
             ->where('id', $id)
             ->update([
@@ -286,6 +296,8 @@ class OscillationEngine
     {
         $xPoints = self::decodeJson($row->x_points) ?? [];
         $yPoints = self::decodeJson($row->y_points) ?? [];
+        $xPoints = self::normalizeAndLabelPoints(is_array($xPoints) ? $xPoints : [], 'X');
+        $yPoints = self::normalizeAndLabelPoints(is_array($yPoints) ? $yPoints : [], 'Y');
         $engineState = self::decodeJson($row->engine_state) ?? null;
 
         return [
@@ -293,11 +305,43 @@ class OscillationEngine
             'symbol' => (string)$row->symbol,
             'interval' => (string)$row->interval,
             'status' => (string)$row->status,
-            'x_points' => is_array($xPoints) ? $xPoints : [],
-            'y_points' => is_array($yPoints) ? $yPoints : [],
+            'x_points' => $xPoints,
+            'y_points' => $yPoints,
             'engine_state' => is_array($engineState) ? $engineState : null,
             'start_time' => isset($row->start_time) ? ($row->start_time !== null ? (string)$row->start_time : null) : null,
         ];
+    }
+
+    private static function normalizeAndLabelPoints(array $points, string $kind): array
+    {
+        $out = [];
+        foreach ($points as $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            if (!isset($p['time']) || !isset($p['price'])) {
+                continue;
+            }
+            $time = (string)$p['time'];
+            $price = (float)$p['price'];
+            if ($time === '' || !is_finite($price)) {
+                continue;
+            }
+            $row = $p;
+            $row['time'] = $time;
+            $row['price'] = $price;
+            $row['kind'] = $kind;
+            $out[] = $row;
+        }
+
+        $i = 1;
+        foreach ($out as &$p) {
+            $p['label'] = $kind . (string)$i;
+            $i++;
+        }
+        unset($p);
+
+        return $out;
     }
 
     private static function normalizeKlineRow(object $row): array

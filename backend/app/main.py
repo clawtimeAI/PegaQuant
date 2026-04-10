@@ -27,12 +27,20 @@ app.include_router(api_router)
 @app.on_event("startup")
 async def on_startup():
     if not settings.enable_kline_stream_service:
-        return
-    from app.services.kline_stream_service import KlineStreamService
+        app.state.kline_stream_service = None
+    else:
+        from app.services.kline_stream_service import KlineStreamService
 
-    svc = KlineStreamService(session_factory=SessionLocal)
-    app.state.kline_stream_service = svc
-    asyncio.create_task(svc.start())
+        svc = KlineStreamService(session_factory=SessionLocal)
+        app.state.kline_stream_service = svc
+        asyncio.create_task(svc.start())
+
+    from app.services.strategy_runner_service import StrategyRunnerService
+
+    runner = StrategyRunnerService(session_factory=SessionLocal)
+    app.state.strategy_runner_service = runner
+    if settings.enable_strategy_runner:
+        await runner.start()
 
 
 @app.on_event("shutdown")
@@ -40,6 +48,9 @@ async def on_shutdown():
     svc = getattr(app.state, "kline_stream_service", None)
     if svc is not None:
         await svc.stop()
+    runner = getattr(app.state, "strategy_runner_service", None)
+    if runner is not None:
+        await runner.stop()
 
 
 @app.websocket("/ws/klines")

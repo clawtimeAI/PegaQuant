@@ -85,7 +85,14 @@ class Events
             foreach ($symbols as $symbol) {
                 foreach ($intervals as $interval) {
                     try {
-                        OscillationEngine::run($symbol, $interval);
+                     //   OscillationEngine::run($symbol, $interval);
+                      //  NewOscillationEngine::run($symbol, $interval);
+                    //    AbcEngine::run($symbol, $interval);
+                        // if($interval === '1m')
+                        // {
+                        //     continue;
+                        // }
+                        NewOscillationEngineV3::run($symbol, $interval);
                     } catch (\Throwable $e) {
                     }
                 }
@@ -818,7 +825,7 @@ class Events
 
         if ($worker->id == 0) {
             Timer::add(1, array('\plugin\webman\gateway\Events', 'startBinanceMarketKlineStreams'), [['BTCUSDT'], ['1m','5m', '15m', '30m', '1h', '4h']], false);
-            Timer::add(60, array('\plugin\webman\gateway\Events', 'checkKlines'), null, true);
+            Timer::add(1, array('\plugin\webman\gateway\Events', 'checkKlines'), null, false);
         }
  
     }

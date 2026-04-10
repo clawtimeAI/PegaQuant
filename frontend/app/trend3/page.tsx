@@ -4,13 +4,23 @@ import { useEffect, useMemo, useState } from "react";
 
 type Interval = "1m" | "5m" | "15m" | "30m" | "1h" | "4h";
 
-type Structure = {
+type V3Point = {
+  time?: string | null;
+  price?: number | null;
+  side?: string | null;
+};
+
+type KeyPoint = { time: string; price: number; kind?: string; label?: string };
+
+type StructureV3 = {
   id: number;
   symbol: string;
   interval: string;
   status: string;
-  x_points: Array<{ time: string; price: number; kind?: string; label?: string }>;
-  y_points: Array<{ time: string; price: number; kind?: string; label?: string }>;
+  x_points: KeyPoint[];
+  y_points: KeyPoint[];
+  a_point?: V3Point | null;
+  episode?: Record<string, unknown> | null;
   close_reason?: string | null;
   close_condition?: Record<string, unknown> | null;
   engine_state?: Record<string, unknown> | null;
@@ -62,6 +72,7 @@ async function apiPostNoBody<T>(path: string): Promise<T> {
   }
   throw lastErr instanceof Error ? lastErr : new Error("fetch failed");
 }
+
 const INTERVALS: Interval[] = ["1m", "5m", "15m", "30m", "1h", "4h"];
 
 async function apiGet<T>(path: string): Promise<T> {
@@ -118,13 +129,21 @@ function formatEpochSec(v?: number | null) {
   return d.toLocaleString();
 }
 
-export default function TrendPage() {
+function formatPoint(p?: V3Point | null) {
+  if (!p) return "-";
+  const t = p.time ? formatTs(p.time) : "-";
+  const pr = typeof p.price === "number" ? String(p.price) : "-";
+  const s = p.side ? String(p.side) : "-";
+  return `${s} · ${t} · ${pr}`;
+}
+
+export default function Trend3Page() {
   const [interval, setIntervalValue] = useState<Interval>("1h");
   const [symbols, setSymbols] = useState<string[]>([]);
   const [symbol, setSymbol] = useState<string>("");
   const [status, setStatus] = useState<string>("");
 
-  const [structures, setStructures] = useState<Structure[]>([]);
+  const [structures, setStructures] = useState<StructureV3[]>([]);
   const [structuresLimit, setStructuresLimit] = useState<number>(50);
   const [structuresOffset, setStructuresOffset] = useState<number>(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -151,7 +170,7 @@ export default function TrendPage() {
   useEffect(() => {
     let cancelled = false;
     setError("");
-    apiGet<string[]>(`/trend/symbols?interval=${encodeURIComponent(interval)}`)
+    apiGet<string[]>(`/trend3/symbols?interval=${encodeURIComponent(interval)}`)
       .then((rows) => {
         if (cancelled) return;
         setSymbols(rows);
@@ -180,7 +199,7 @@ export default function TrendPage() {
         offset: String(structuresOffset),
       });
       if (status) qs.set("status", status);
-      const rows = await apiGet<Structure[]>(`/trend/structures?${qs.toString()}`);
+      const rows = await apiGet<StructureV3[]>(`/trend3/structures?${qs.toString()}`);
       setStructures(rows);
       setSelectedId(rows[0]?.id ?? null);
     } catch (e) {
@@ -209,7 +228,7 @@ export default function TrendPage() {
 
   async function loadRunnerStatus() {
     try {
-      const st = await apiGet<RunnerStatus>("/trend/runner/status");
+      const st = await apiGet<RunnerStatus>("/trend3/runner/status");
       setRunner(st);
     } catch {
       setRunner(null);
@@ -227,7 +246,7 @@ export default function TrendPage() {
     setBusy(true);
     setError("");
     try {
-      await apiPost<{ processed_bars: number; active_structure_id: number }>(`/trend/run`, {
+      await apiPost<{ ok: boolean }>(`/trend3/run`, {
         symbol,
         interval,
       });
@@ -244,7 +263,7 @@ export default function TrendPage() {
     setError("");
     try {
       const qs = new URLSearchParams({ dry_run: "true", mode: "both" });
-      const st = await apiPostNoBody<RunnerStatus>(`/trend/runner/start?${qs.toString()}`);
+      const st = await apiPostNoBody<RunnerStatus>(`/trend3/runner/start?${qs.toString()}`);
       setRunner(st);
     } catch (e) {
       setError(String(e));
@@ -257,7 +276,7 @@ export default function TrendPage() {
     setRunnerBusy(true);
     setError("");
     try {
-      const st = await apiPostNoBody<RunnerStatus>("/trend/runner/stop");
+      const st = await apiPostNoBody<RunnerStatus>("/trend3/runner/stop");
       setRunner(st);
     } catch (e) {
       setError(String(e));
@@ -271,8 +290,8 @@ export default function TrendPage() {
       <div className="rounded-xl border border-white/10 bg-white/5 p-5">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div className="space-y-1">
-            <h1 className="text-xl font-semibold tracking-tight">趋势</h1>
-            <p className="text-sm text-white">按交易对与周期查看震荡结构体数据。</p>
+            <h1 className="text-xl font-semibold tracking-tight">趋势 V3</h1>
+            <p className="text-sm text-white">加载 oscillation_structures_v3 数据。</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -455,6 +474,7 @@ export default function TrendPage() {
                     <th className="px-3 py-2">开始</th>
                     <th className="px-3 py-2">结束</th>
                     <th className="px-3 py-2">X/Y</th>
+                    <th className="px-3 py-2">A 点</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -474,6 +494,7 @@ export default function TrendPage() {
                         <td className="px-3 py-2">
                           {s.x_points?.length ?? 0}/{s.y_points?.length ?? 0}
                         </td>
+                        <td className="px-3 py-2 font-mono text-[11px] text-white/70">{formatPoint(s.a_point)}</td>
                       </tr>
                     );
                   })}
@@ -505,6 +526,10 @@ export default function TrendPage() {
                   </div>
                 </div>
                 <div className="col-span-2">
+                  <div className="text-xs text-white">A 点</div>
+                  <div className="font-mono text-xs text-white/80">{formatPoint(selected.a_point)}</div>
+                </div>
+                <div className="col-span-2">
                   <div className="text-xs text-white">关闭原因</div>
                   <div>{selected.close_reason ?? "-"}</div>
                 </div>
@@ -512,9 +537,7 @@ export default function TrendPage() {
 
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div className="rounded-lg border border-white/10 bg-[#0b0e11]">
-                  <div className="border-b border-white/10 px-3 py-2 text-xs font-medium text-white">
-                    X 点（下轨）
-                  </div>
+                  <div className="border-b border-white/10 px-3 py-2 text-xs font-medium text-white">X 点（下轨）</div>
                   <div className="max-h-56 overflow-auto">
                     {selected.x_points?.length ? (
                       <table className="w-full text-left text-xs">
@@ -527,13 +550,8 @@ export default function TrendPage() {
                         </thead>
                         <tbody>
                           {selected.x_points.map((p, idx) => (
-                            <tr
-                              key={`${p.time}-${p.label ?? idx}`}
-                              className="border-b border-white/5 hover:bg-white/5"
-                            >
-                              <td className="px-3 py-2 font-mono text-[11px] text-white/70">
-                                {p.label ?? `X${idx + 1}`}
-                              </td>
+                            <tr key={`${p.time}-${p.label ?? idx}`} className="border-b border-white/5 hover:bg-white/5">
+                              <td className="px-3 py-2 font-mono text-[11px] text-white/70">{p.label ?? `X${idx + 1}`}</td>
                               <td className="px-3 py-2">{formatTs(p.time)}</td>
                               <td className="px-3 py-2 font-mono">{p.price}</td>
                             </tr>
@@ -547,9 +565,7 @@ export default function TrendPage() {
                 </div>
 
                 <div className="rounded-lg border border-white/10 bg-[#0b0e11]">
-                  <div className="border-b border-white/10 px-3 py-2 text-xs font-medium text-white">
-                    Y 点（上轨）
-                  </div>
+                  <div className="border-b border-white/10 px-3 py-2 text-xs font-medium text-white">Y 点（上轨）</div>
                   <div className="max-h-56 overflow-auto">
                     {selected.y_points?.length ? (
                       <table className="w-full text-left text-xs">
@@ -562,13 +578,8 @@ export default function TrendPage() {
                         </thead>
                         <tbody>
                           {selected.y_points.map((p, idx) => (
-                            <tr
-                              key={`${p.time}-${p.label ?? idx}`}
-                              className="border-b border-white/5 hover:bg-white/5"
-                            >
-                              <td className="px-3 py-2 font-mono text-[11px] text-white/70">
-                                {p.label ?? `Y${idx + 1}`}
-                              </td>
+                            <tr key={`${p.time}-${p.label ?? idx}`} className="border-b border-white/5 hover:bg-white/5">
+                              <td className="px-3 py-2 font-mono text-[11px] text-white/70">{p.label ?? `Y${idx + 1}`}</td>
                               <td className="px-3 py-2">{formatTs(p.time)}</td>
                               <td className="px-3 py-2 font-mono">{p.price}</td>
                             </tr>
@@ -581,6 +592,13 @@ export default function TrendPage() {
                   </div>
                 </div>
               </div>
+
+              <details className="rounded-lg border border-white/10 bg-[#0b0e11] p-3">
+                <summary className="cursor-pointer text-xs font-medium">episode</summary>
+                <pre className="mt-2 overflow-auto rounded bg-white/5 p-2 text-xs text-white">
+                  {JSON.stringify(selected.episode ?? null, null, 2)}
+                </pre>
+              </details>
 
               <details className="rounded-lg border border-white/10 bg-[#0b0e11] p-3">
                 <summary className="cursor-pointer text-xs font-medium">close_condition / engine_state</summary>

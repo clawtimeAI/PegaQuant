@@ -25,5 +25,17 @@ class Settings(BaseSettings):
     kline_sender_queue_size: int = 2000
     kline_boll_period: int = 400
 
+    enable_strategy_runner: bool = False
+    strategy_dry_run: bool = True
+    strategy_webman_base_url: str = "http://127.0.0.1:8787"
+    strategy_poll_interval_sec: float = 2.0
+    strategy_symbols: str = "BTCUSDT"
+    strategy_mode: str = "both"
+    strategy_account_id: int = 1
+    strategy_leverage: int = 1
+    strategy_risk_usdt: float = 20.0
+    strategy_max_notional_usdt: float = 200.0
+    strategy_qty_precision: int = 3
+
 
 settings = Settings()
