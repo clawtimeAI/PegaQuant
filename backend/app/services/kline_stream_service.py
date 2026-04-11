@@ -11,7 +11,13 @@ import websockets
 from fastapi import WebSocket
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.repositories.kline_repo import Interval, list_recent_klines, prune_old_klines, upsert_klines
+from app.repositories.kline_repo import (
+    Interval,
+    compute_mouth_state_from_db,
+    list_recent_klines,
+    prune_old_klines,
+    upsert_klines,
+)
 from app.services.oscillation_engine import run_oscillation_engine
 from app.settings import settings
 
@@ -438,6 +444,26 @@ class KlineStreamService:
                 "boll_mb": candle.boll_mb,
                 "boll_dn": candle.boll_dn,
             }
+            mb = row.get("boll_mb")
+            up = row.get("boll_up")
+            dn = row.get("boll_dn")
+            if mb is None or up is None or dn is None:
+                row["bw"] = None
+            else:
+                mbf = float(mb)
+                if mbf == 0.0:
+                    row["bw"] = None
+                else:
+                    row["bw"] = (float(up) - float(dn)) / mbf
+            row["mouth_state"] = compute_mouth_state_from_db(
+                db,
+                symbol=candle.symbol,
+                interval=candle.interval,
+                open_time=row["open_time"],
+                boll_up=row["boll_up"],
+                boll_mb=row["boll_mb"],
+                boll_dn=row["boll_dn"],
+            )
             upsert_klines(db, symbol=candle.symbol, interval=candle.interval, rows=[row])
             prune_old_klines(db, symbol=candle.symbol, interval=candle.interval, keep=self.maxlen)
             db.commit()

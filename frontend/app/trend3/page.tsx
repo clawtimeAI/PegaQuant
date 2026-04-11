@@ -4,12 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 
 type Interval = "1m" | "5m" | "15m" | "30m" | "1h" | "4h";
 
-type V3Point = {
-  time?: string | null;
-  price?: number | null;
-  side?: string | null;
-};
-
 type KeyPoint = { time: string; price: number; kind?: string; label?: string };
 
 type StructureV3 = {
@@ -19,8 +13,6 @@ type StructureV3 = {
   status: string;
   x_points: KeyPoint[];
   y_points: KeyPoint[];
-  a_point?: V3Point | null;
-  episode?: Record<string, unknown> | null;
   close_reason?: string | null;
   close_condition?: Record<string, unknown> | null;
   engine_state?: Record<string, unknown> | null;
@@ -127,14 +119,6 @@ function formatEpochSec(v?: number | null) {
   const d = new Date(v * 1000);
   if (Number.isNaN(d.getTime())) return String(v);
   return d.toLocaleString();
-}
-
-function formatPoint(p?: V3Point | null) {
-  if (!p) return "-";
-  const t = p.time ? formatTs(p.time) : "-";
-  const pr = typeof p.price === "number" ? String(p.price) : "-";
-  const s = p.side ? String(p.side) : "-";
-  return `${s} · ${t} · ${pr}`;
 }
 
 export default function Trend3Page() {
@@ -474,7 +458,6 @@ export default function Trend3Page() {
                     <th className="px-3 py-2">开始</th>
                     <th className="px-3 py-2">结束</th>
                     <th className="px-3 py-2">X/Y</th>
-                    <th className="px-3 py-2">A 点</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -494,7 +477,6 @@ export default function Trend3Page() {
                         <td className="px-3 py-2">
                           {s.x_points?.length ?? 0}/{s.y_points?.length ?? 0}
                         </td>
-                        <td className="px-3 py-2 font-mono text-[11px] text-white/70">{formatPoint(s.a_point)}</td>
                       </tr>
                     );
                   })}
@@ -526,12 +508,14 @@ export default function Trend3Page() {
                   </div>
                 </div>
                 <div className="col-span-2">
-                  <div className="text-xs text-white">A 点</div>
-                  <div className="font-mono text-xs text-white/80">{formatPoint(selected.a_point)}</div>
-                </div>
-                <div className="col-span-2">
                   <div className="text-xs text-white">关闭原因</div>
                   <div>{selected.close_reason ?? "-"}</div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-xs text-white">X/Y 数量</div>
+                  <div>
+                    {(selected.x_points?.length ?? 0)}/{(selected.y_points?.length ?? 0)}
+                  </div>
                 </div>
               </div>
 
@@ -592,13 +576,6 @@ export default function Trend3Page() {
                   </div>
                 </div>
               </div>
-
-              <details className="rounded-lg border border-white/10 bg-[#0b0e11] p-3">
-                <summary className="cursor-pointer text-xs font-medium">episode</summary>
-                <pre className="mt-2 overflow-auto rounded bg-white/5 p-2 text-xs text-white">
-                  {JSON.stringify(selected.episode ?? null, null, 2)}
-                </pre>
-              </details>
 
               <details className="rounded-lg border border-white/10 bg-[#0b0e11] p-3">
                 <summary className="cursor-pointer text-xs font-medium">close_condition / engine_state</summary>

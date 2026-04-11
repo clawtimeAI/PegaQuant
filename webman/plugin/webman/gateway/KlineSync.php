@@ -29,6 +29,7 @@ class KlineSync
     private static int $minRequestIntervalUs = 55000;
     private static int $lastRequestAtUs = 0;
     private static string $bollSource = 'close';
+    private static int $mouthLookback = 1200;
 
     public static function setBollSource(string $src): void
     {
@@ -287,6 +288,7 @@ class KlineSync
         $table = "kline_$interval";
         $intervalMs = self::intervalToMilliseconds($interval);
         $insertedCount = 0;
+        $mouthCtx = self::initMouthContext($table, $symbol, $interval, null, self::$mouthLookback);
 
         // Get the latest open_time for this symbol and interval
         $latest = Db::table($table)
@@ -302,7 +304,7 @@ class KlineSync
                 : (int)($latestOpenTimeMs * 1000 + $intervalMs);
         } else {
             if ($interval === '10m') {
-                $threeDaysAgoMs = (int)((time() - 30 * 86400) * 1000);
+                $threeDaysAgoMs = (int)((time() - 3 * 86400) * 1000);
                 $startTime = max($onboardDate, $threeDaysAgoMs);
                 $startTime = $startTime - ($startTime % $intervalMs);
             } else {
@@ -344,7 +346,7 @@ class KlineSync
                 break;
             }
 
-            $insertedCount += self::batchInsertKlines($table, $symbol, $filteredCandles);
+            $insertedCount += self::batchInsertKlines($table, $symbol, $filteredCandles, $interval, $mouthCtx);
 
             // Update startTime to the next millisecond after the last close_time
             $lastCandle = end($filteredCandles);
@@ -405,9 +407,137 @@ class KlineSync
         return $candles;
     }
 
-    private static function buildRowsWithBoll(string $symbol, array $candles, array &$prevSources): array
+    private static function getMouthParams(string $interval): array
+    {
+        switch ($interval) {
+            case '1m':
+                return ['eps' => 0.00015, 'switch_delta' => 0.0012, 'confirm_bars' => 3];
+            case '5m':
+                return ['eps' => 0.00015, 'switch_delta' => 0.0016, 'confirm_bars' => 3];
+            case '15m':
+                return ['eps' => 0.00012, 'switch_delta' => 0.0018, 'confirm_bars' => 3];
+            case '30m':
+                return ['eps' => 0.00010, 'switch_delta' => 0.0022, 'confirm_bars' => 3];
+            case '1h':
+                return ['eps' => 0.00008, 'switch_delta' => 0.0026, 'confirm_bars' => 3];
+            case '4h':
+                return ['eps' => 0.00006, 'switch_delta' => 0.0032, 'confirm_bars' => 3];
+            default:
+                return ['eps' => 0.00015, 'switch_delta' => 0.0016, 'confirm_bars' => 3];
+        }
+    }
+
+    private static function updateMouthState(array &$ctx, float $v, array $params): int
+    {
+        $eps = (float)$params['eps'];
+        $switchDelta = (float)$params['switch_delta'];
+        $confirmBars = (int)$params['confirm_bars'];
+
+        $state = isset($ctx['state']) ? (int)$ctx['state'] : 0;
+        $peak = isset($ctx['peak']) ? (float)$ctx['peak'] : null;
+        $trough = isset($ctx['trough']) ? (float)$ctx['trough'] : null;
+        $dropStreak = isset($ctx['drop_streak']) ? (int)$ctx['drop_streak'] : 0;
+        $riseStreak = isset($ctx['rise_streak']) ? (int)$ctx['rise_streak'] : 0;
+
+        if ($state === 0) {
+            $lastV = isset($ctx['last_v']) ? (float)$ctx['last_v'] : null;
+            $state = ($lastV !== null && $v >= $lastV) ? 1 : 2;
+            $peak = $v;
+            $trough = $v;
+            $dropStreak = 0;
+            $riseStreak = 0;
+            $ctx['state'] = $state;
+            $ctx['peak'] = $peak;
+            $ctx['trough'] = $trough;
+            $ctx['drop_streak'] = $dropStreak;
+            $ctx['rise_streak'] = $riseStreak;
+            $ctx['last_v'] = $v;
+            return $state;
+        }
+
+        if ($state === 1) {
+            if ($peak === null || $v >= $peak + $eps) {
+                $peak = $v;
+                $dropStreak = 0;
+            } else {
+                if ($v <= $peak - $switchDelta) {
+                    $dropStreak++;
+                    if ($dropStreak >= $confirmBars) {
+                        $state = 2;
+                        $trough = $v;
+                        $riseStreak = 0;
+                        $dropStreak = 0;
+                    }
+                } else {
+                    $dropStreak = 0;
+                }
+            }
+        } else {
+            if ($trough === null || $v <= $trough - $eps) {
+                $trough = $v;
+                $riseStreak = 0;
+            } else {
+                if ($v >= $trough + $switchDelta) {
+                    $riseStreak++;
+                    if ($riseStreak >= $confirmBars) {
+                        $state = 1;
+                        $peak = $v;
+                        $riseStreak = 0;
+                        $dropStreak = 0;
+                    }
+                } else {
+                    $riseStreak = 0;
+                }
+            }
+        }
+
+        $ctx['state'] = $state;
+        $ctx['peak'] = $peak;
+        $ctx['trough'] = $trough;
+        $ctx['drop_streak'] = $dropStreak;
+        $ctx['rise_streak'] = $riseStreak;
+        $ctx['last_v'] = $v;
+
+        return $state;
+    }
+
+    private static function initMouthContext(string $table, string $symbol, string $interval, ?string $beforeTime, int $lookback): array
+    {
+        $q = Db::table($table)
+            ->where('symbol', $symbol)
+            ->whereNotNull('boll_mb');
+        if ($beforeTime !== null && trim($beforeTime) !== '') {
+            $q->where('open_time', '<', $beforeTime);
+        }
+        $rows = $q->orderBy('open_time', 'desc')
+            ->take($lookback)
+            ->get(['boll_up', 'boll_dn', 'boll_mb'])
+            ->toArray();
+
+        $rows = array_reverse($rows);
+        $params = self::getMouthParams($interval);
+        $ctx = ['state' => 0, 'peak' => null, 'trough' => null, 'drop_streak' => 0, 'rise_streak' => 0, 'last_v' => null];
+        foreach ($rows as $r) {
+            $mb = isset($r->boll_mb) ? $r->boll_mb : null;
+            $up = isset($r->boll_up) ? $r->boll_up : null;
+            $dn = isset($r->boll_dn) ? $r->boll_dn : null;
+            if ($mb === null || $up === null || $dn === null) {
+                continue;
+            }
+            $mb = (float)$mb;
+            if ($mb == 0.0) {
+                continue;
+            }
+            $v = ((float)$up - (float)$dn) / $mb;
+            self::updateMouthState($ctx, $v, $params);
+        }
+        return $ctx;
+    }
+
+    private static function buildRowsWithBoll(string $symbol, array $candles, array &$prevSources, string $interval, array &$mouthCtx): array
     {
         $rows = [];
+        $mouthParams = self::getMouthParams($interval);
         foreach ($candles as $candle) {
             if (!is_array($candle) || count($candle) < 12) {
                 continue;
@@ -433,6 +563,7 @@ class KlineSync
             $bollUp = null;
             $bollMb = null;
             $bollDn = null;
+            $bw = null;
             if (count($prevSources) >= self::$bollPeriod - 1) {
                 if (count($prevSources) > self::$bollPeriod - 1) {
                     $prevSources = array_slice($prevSources, - (self::$bollPeriod - 1));
@@ -454,6 +585,16 @@ class KlineSync
                 $bollDn = $bollMb - self::$bollStdDev * $stdDev;
             }
 
+            $mouthState = 0;
+            if ($bollMb !== null && $bollUp !== null && $bollDn !== null) {
+                $mbf = (float)$bollMb;
+                if ($mbf != 0.0) {
+                    $v = ((float)$bollUp - (float)$bollDn) / $mbf;
+                    $bw = $v;
+                    $mouthState = self::updateMouthState($mouthCtx, $v, $mouthParams);
+                }
+            }
+
             $rows[] = [
                 'symbol' => $symbol,
                 'open' => $candle[1],
@@ -470,6 +611,8 @@ class KlineSync
                 'boll_up' => $bollUp,
                 'boll_mb' => $bollMb,
                 'boll_dn' => $bollDn,
+                'bw' => $bw,
+                'mouth_state' => $mouthState,
             ];
 
             $prevSources[] = $srcVal;
@@ -498,13 +641,14 @@ class KlineSync
      * @param array $candles K-line data
      * @return int Number of inserted records
      */
-    private static function batchInsertKlines(string $table, string $symbol, array $candles): int
+    private static function batchInsertKlines(string $table, string $symbol, array $candles, string $interval, array &$mouthCtx): int
     {
         if (empty($candles)) {
             return 0;
         }
 
         $rows = [];
+        $mouthParams = self::getMouthParams($interval);
 
         $prevRows = Db::table($table)
             ->where('symbol', $symbol)
@@ -535,6 +679,7 @@ class KlineSync
             $bollUp = null;
             $bollMb = null;
             $bollDn = null;
+            $bw = null;
 
             $srcVal = (function($c){
                 $o = (float)$c[1]; $h = (float)$c[2]; $l = (float)$c[3]; $cl = (float)$c[4];
@@ -562,6 +707,16 @@ class KlineSync
                 $bollDn = $bollMb - self::$bollStdDev * $stdDev;
             }
 
+            $mouthState = 0;
+            if ($bollMb !== null && $bollUp !== null && $bollDn !== null) {
+                $mbf = (float)$bollMb;
+                if ($mbf != 0.0) {
+                    $v = ((float)$bollUp - (float)$bollDn) / $mbf;
+                    $bw = $v;
+                    $mouthState = self::updateMouthState($mouthCtx, $v, $mouthParams);
+                }
+            }
+
             $rows[] = [
                 'symbol' => $symbol,
                 'open' => $candle[1],
@@ -578,6 +733,8 @@ class KlineSync
                 'boll_up' => $bollUp,
                 'boll_mb' => $bollMb,
                 'boll_dn' => $bollDn,
+                'bw' => $bw,
+                'mouth_state' => $mouthState,
             ];
 
             $prevSources[] = $srcVal;
@@ -591,10 +748,11 @@ class KlineSync
             return 0;
         }
 
-        $inserted = Db::table($table)->insertOrIgnore($rows);
-        echo "Inserted " . $inserted . " $table records for $symbol with Bollinger Bands\n";
+        $updateColumns = ['open', 'high', 'low', 'close', 'volume', 'amount', 'num_trades', 'buy_volume', 'buy_amount', 'close_time', 'boll_up', 'boll_mb', 'boll_dn', 'bw', 'mouth_state'];
+        Db::table($table)->upsert($rows, ['symbol', 'open_time'], $updateColumns);
+        echo "Upserted " . count($rows) . " $table records for $symbol with Bollinger Bands\n";
 
-        return $inserted;
+        return count($rows);
     }
 
     public static function insertClosedKlineFromStream(string $symbol, string $interval, array $kline): int
@@ -625,7 +783,8 @@ class KlineSync
             '0',
         ];
 
-        return self::batchInsertKlines($table, $symbol, [$candle]);
+        $mouthCtx = self::initMouthContext($table, $symbol, $interval, null, self::$mouthLookback);
+        return self::batchInsertKlines($table, $symbol, [$candle], $interval, $mouthCtx);
     }
 
     public static function backfill(string $symbol, string $interval, int $startTimeMs, int $endTimeMs): array
@@ -649,6 +808,7 @@ class KlineSync
 
         $insertedCount = 0;
         $prevSources = [];
+        $mouthCtx = self::initMouthContext($table, $symbol, $interval, date('Y-m-d H:i:s', (int)($startTimeMs / 1000)), self::$mouthLookback);
         while ($startTimeMs < $endTimeMs) {
             $candles = self::fetchKlines($symbol, $interval, $startTimeMs, $endTimeMs);
             if (empty($candles)) {
@@ -665,9 +825,9 @@ class KlineSync
                 break;
             }
 
-            $rows = self::buildRowsWithBoll($symbol, $filtered, $prevSources);
+            $rows = self::buildRowsWithBoll($symbol, $filtered, $prevSources, $interval, $mouthCtx);
             if (!empty($rows)) {
-                $updateColumns = ['open', 'high', 'low', 'close', 'volume', 'amount', 'num_trades', 'buy_volume', 'buy_amount', 'close_time', 'boll_up', 'boll_mb', 'boll_dn'];
+                $updateColumns = ['open', 'high', 'low', 'close', 'volume', 'amount', 'num_trades', 'buy_volume', 'buy_amount', 'close_time', 'boll_up', 'boll_mb', 'boll_dn', 'bw', 'mouth_state'];
                 Db::table($table)->upsert($rows, ['symbol', 'open_time'], $updateColumns);
                 $insertedCount += count($rows);
             }

@@ -49,6 +49,29 @@ class OscillationStructureV3Out(BaseModel):
     updated_at: datetime
 
 
+class OscillationStructureV4Out(BaseModel):
+    id: int
+    symbol: str
+    interval: str
+    status: str
+    x_points: list[dict[str, Any]] = Field(default_factory=list)
+    y_points: list[dict[str, Any]] = Field(default_factory=list)
+    close_reason: str | None = None
+    close_condition: dict[str, Any] | None = None
+    engine_state: dict[str, Any] | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    open_start_time: datetime | None = None
+    open_start_bw: float | None = None
+    open_confirm_time: datetime | None = None
+    open_confirm_bw: float | None = None
+    close_start_time: datetime | None = None
+    close_start_bw: float | None = None
+    peak_bw_since_open_confirm: float | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class OscillationRunIn(BaseModel):
     symbol: str
     interval: Interval

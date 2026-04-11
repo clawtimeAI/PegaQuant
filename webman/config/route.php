@@ -89,25 +89,62 @@ $marketBackfillHandler = function (Request $request) {
     $symbol = strtoupper(trim((string)$request->get('symbol', '')));
     $interval = trim((string)$request->get('interval', '1m'));
     $days = (int)$request->get('days', 10);
+    $startMs = (int)$request->get('start_ms', 0);
+    $endMs = (int)$request->get('end_ms', 0);
+    $resetAll = (int)$request->get('reset_all', 0) === 1;
+    $reset = $resetAll || ((int)$request->get('reset', 0) === 1);
+
     if ($days <= 0) {
         $days = 10;
     }
-    if ($days > 30) {
-        $days = 30;
+    if ($days > 365) {
+        $days = 365;
     }
-    if ($symbol === '' || $interval !== '1m') {
+
+    $allowedIntervals = ['1m', '5m', '15m', '30m', '1h', '4h'];
+    if ($symbol === '' || !in_array($interval, $allowedIntervals, true)) {
         return json([
             'ok' => false,
-            'error' => 'only interval=1m supported',
+            'error' => 'invalid symbol or interval',
         ])->withHeaders(_corsHeaders());
     }
 
-    $endMs = (int)(microtime(true) * 1000);
-    $startMs = $endMs - $days * 24 * 60 * 60 * 1000;
+    if ($endMs <= 0) {
+        $endMs = (int)(microtime(true) * 1000);
+    }
+    if ($startMs <= 0) {
+        $startMs = $endMs - $days * 24 * 60 * 60 * 1000;
+    }
+    if ($startMs <= 0 || $endMs <= 0 || $endMs <= $startMs) {
+        return json([
+            'ok' => false,
+            'error' => 'invalid time range',
+        ])->withHeaders(_corsHeaders());
+    }
+
+    $table = 'kline_' . $interval;
+    $deleted = 0;
+    if ($reset) {
+        if ($resetAll) {
+            $deleted = Db::table($table)->where('symbol', $symbol)->delete();
+        } else {
+            $startTime = date('Y-m-d H:i:s', (int)floor($startMs / 1000));
+            $endTime = date('Y-m-d H:i:s', (int)floor($endMs / 1000));
+            $deleted = Db::table($table)
+                ->where('symbol', $symbol)
+                ->where('open_time', '>=', $startTime)
+                ->where('open_time', '<', $endTime)
+                ->delete();
+        }
+    }
+
     $result = KlineSync::backfill($symbol, $interval, $startMs, $endMs);
     $range = _klineRange('kline_' . $interval, $symbol);
     return json([
         'ok' => true,
+        'deleted' => $deleted,
+        'start_ms' => $startMs,
+        'end_ms' => $endMs,
         'result' => $result,
         'range' => $range,
     ])->withHeaders(_corsHeaders());

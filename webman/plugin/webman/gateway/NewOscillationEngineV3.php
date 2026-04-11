@@ -125,12 +125,15 @@ class NewOscillationEngineV3
                     $pending['in_band_streak'] = 0;
                 }
 
-                if ((bool)$pending['middle_touched'] || (!$isFirstPointOfStructure && (int)$pending['in_band_streak'] >= $inBandConfirmBars)) {
+                $hasAnyConfirmed = count($xPoints) > 0 || count($yPoints) > 0;
+                $canConfirmByInBand = $hasAnyConfirmed && (int)($pending['in_band_streak'] ?? 0) >= $inBandConfirmBars;
+                if ((bool)$pending['middle_touched'] || $canConfirmByInBand) {
                     $point = [
                         'time' => (string)$pending['time'],
                         'price' => (float)$pending['price'],
                         'kind' => $kind,
                     ];
+
                     if ($kind === 'X') {
                         $point['label'] = 'X' . (string)(count($xPoints) + 1);
                         $xPoints[] = $point;
@@ -138,8 +141,8 @@ class NewOscillationEngineV3
                         $point['label'] = 'Y' . (string)(count($yPoints) + 1);
                         $yPoints[] = $point;
                     }
-                    $pending = null;
                     $updated++;
+                    $pending = null;
                 }
             }
             if ($pending === null) {
@@ -213,6 +216,181 @@ class NewOscillationEngineV3
 
                 if ($outsideStreak >= $outsideConfirmBars) {
                     $episodeConfirmTime = $row['open_time'];
+
+                    $anchorPrice = null;
+                    if ($episodeSide === 'DN' && count($xPoints) > 0) {
+                        $anchorPrice = (float)$xPoints[count($xPoints) - 1]['price'];
+                    } elseif ($episodeSide === 'UP' && count($yPoints) > 0) {
+                        $anchorPrice = (float)$yPoints[count($yPoints) - 1]['price'];
+                    }
+
+                    $episodeExtremePrice = null;
+                    if ($pending !== null && isset($pending['kind']) && isset($pending['price'])) {
+                        $pk = (string)$pending['kind'];
+                        if ($episodeSide === 'DN' && $pk === 'X') {
+                            $episodeExtremePrice = (float)$pending['price'];
+                        } elseif ($episodeSide === 'UP' && $pk === 'Y') {
+                            $episodeExtremePrice = (float)$pending['price'];
+                        }
+                    }
+                    if ($episodeExtremePrice === null) {
+                        $episodeExtremePrice = $episodeSide === 'DN' ? (float)$row['low'] : (float)$row['high'];
+                    }
+
+                    $broken = false;
+                    if ($anchorPrice !== null) {
+                        if ($episodeSide === 'DN' && (float)$episodeExtremePrice < (float)$anchorPrice) {
+                            $broken = true;
+                        } elseif ($episodeSide === 'UP' && (float)$episodeExtremePrice > (float)$anchorPrice) {
+                            $broken = true;
+                        }
+                    }
+
+                    if ($broken && $episodeStartTime !== null && trim((string)$episodeStartTime) !== '') {
+                        $boundaryTime = (string)$episodeStartTime;
+                        $splitX = self::splitPointsByBoundary($xPoints, $boundaryTime);
+                        $splitY = self::splitPointsByBoundary($yPoints, $boundaryTime);
+                        $oldXPoints = $splitX['before'];
+                        $oldYPoints = $splitY['before'];
+                        $carryXPoints = $splitX['after'];
+                        $carryYPoints = $splitY['after'];
+
+                        $oldPending = null;
+                        $carryPending = null;
+                        if ($pending !== null && isset($pending['time'])) {
+                            $pendingTime = (string)$pending['time'];
+                            if ($pendingTime !== '' && self::timeLt($pendingTime, $boundaryTime)) {
+                                $oldPending = $pending;
+                            } else {
+                                $carryPending = $pending;
+                            }
+                        }
+
+                        $shouldCloseOld = ($active['a_point'] !== null) || (count($oldXPoints) > 0) || (count($oldYPoints) > 0);
+                        if ($shouldCloseOld) {
+                            $closeEngineState = [
+                                'phase' => $phase,
+                                'last_processed_open_time' => $lastProcessed,
+                                'pending' => $oldPending,
+                                'outside_side' => $outsideSide,
+                                'outside_streak' => $outsideStreak,
+                                'episode_side' => $episodeSide,
+                                'episode_start_time' => $episodeStartTime,
+                                'episode_confirm_time' => $episodeConfirmTime,
+                                'start_boll_up' => $startBollUp,
+                                'start_boll_dn' => $startBollDn,
+                                'start_band_width' => $startBandWidth,
+                                'start_band_time' => $startBandTime,
+                                'reentry_time' => $reentryTime,
+                                'max_band_width_after_reentry' => $maxBandWidthAfterReentry,
+                                'band_2x_reached' => $band2xReached,
+                                'a_candidate_time' => $aCandidateTime,
+                                'a_candidate_price' => $aCandidatePrice,
+                                'restart_side' => $restartSide,
+                                'restart_streak' => $restartStreak,
+                                'restart_start_time' => $restartStartTime,
+                                'restart_start_boll_up' => $restartStartBollUp,
+                                'restart_start_boll_dn' => $restartStartBollDn,
+                                'restart_start_band_width' => $restartStartBandWidth,
+                                'restart_start_band_time' => $restartStartBandTime,
+                                'last_upper_touch_time' => $lastUpperTouchTime,
+                                'last_lower_touch_time' => $lastLowerTouchTime,
+                                'flow_to_dn_first_touch_time' => $flowToDnFirstTouchTime,
+                                'flow_to_up_first_touch_time' => $flowToUpFirstTouchTime,
+                            ];
+
+                            self::closeStructure(
+                                (int)$active['id'],
+                                $boundaryTime,
+                                'BREAK_STRUCTURE_OUTSIDE_30',
+                                [
+                                    'episode_side' => $episodeSide,
+                                    'episode_start_time' => $episodeStartTime,
+                                    'episode_confirm_time' => $episodeConfirmTime,
+                                    'outside_confirm_bars' => $outsideConfirmBars,
+                                    'anchor_price' => $anchorPrice,
+                                    'episode_extreme_price' => $episodeExtremePrice,
+                                ],
+                                $oldXPoints,
+                                $oldYPoints,
+                                $active['a_point'],
+                                $active['episode'],
+                                $closeEngineState,
+                                $active['start_time']
+                            );
+                            $closed++;
+
+                            $active = self::createStructure($symbol, $interval, $boundaryTime);
+                        }
+                        $xPoints = self::relabelPoints($carryXPoints, 'X');
+                        $yPoints = self::relabelPoints($carryYPoints, 'Y');
+                        $pending = $carryPending;
+
+                        $phase = 'WAIT_REENTRY';
+                        $outsideSide = $episodeSide;
+                        $outsideStreak = max($outsideConfirmBars, $outsideStreak);
+                        $reentryTime = null;
+                        $maxBandWidthAfterReentry = null;
+                        $band2xReached = false;
+                        $aCandidateTime = null;
+                        $aCandidatePrice = null;
+                        $restartSide = null;
+                        $restartStreak = 0;
+                        $restartStartTime = null;
+                        $restartStartBollUp = null;
+                        $restartStartBollDn = null;
+                        $restartStartBandWidth = null;
+                        $restartStartBandTime = null;
+                        $lastUpperTouchTime = null;
+                        $lastLowerTouchTime = null;
+                        $flowToDnFirstTouchTime = null;
+                        $flowToUpFirstTouchTime = null;
+
+                        $engineState = [
+                            'phase' => $phase,
+                            'last_processed_open_time' => $lastProcessed,
+                            'pending' => $pending,
+                            'outside_side' => $outsideSide,
+                            'outside_streak' => $outsideStreak,
+                            'episode_side' => $episodeSide,
+                            'episode_start_time' => $episodeStartTime,
+                            'episode_confirm_time' => $episodeConfirmTime,
+                            'start_boll_up' => $startBollUp,
+                            'start_boll_dn' => $startBollDn,
+                            'start_band_width' => $startBandWidth,
+                            'start_band_time' => $startBandTime,
+                            'reentry_time' => $reentryTime,
+                            'max_band_width_after_reentry' => $maxBandWidthAfterReentry,
+                            'band_2x_reached' => $band2xReached,
+                            'a_candidate_time' => $aCandidateTime,
+                            'a_candidate_price' => $aCandidatePrice,
+                            'restart_side' => $restartSide,
+                            'restart_streak' => $restartStreak,
+                            'restart_start_time' => $restartStartTime,
+                            'restart_start_boll_up' => $restartStartBollUp,
+                            'restart_start_boll_dn' => $restartStartBollDn,
+                            'restart_start_band_width' => $restartStartBandWidth,
+                            'restart_start_band_time' => $restartStartBandTime,
+                            'last_upper_touch_time' => $lastUpperTouchTime,
+                            'last_lower_touch_time' => $lastLowerTouchTime,
+                            'flow_to_dn_first_touch_time' => $flowToDnFirstTouchTime,
+                            'flow_to_up_first_touch_time' => $flowToUpFirstTouchTime,
+                        ];
+                        self::saveActiveStructure(
+                            (int)$active['id'],
+                            $xPoints,
+                            $yPoints,
+                            null,
+                            null,
+                            $engineState,
+                            $boundaryTime
+                        );
+                        $active['engine_state'] = $engineState;
+                        $active['start_time'] = $boundaryTime;
+                        $updated++;
+                        continue;
+                    }
+
                     $phase = 'WAIT_REENTRY';
                     $reentryTime = null;
                     $maxBandWidthAfterReentry = null;
@@ -410,7 +588,7 @@ class NewOscillationEngineV3
                         }
                     }
 
-                    $shouldCloseOld = ($active['a_point'] !== null) || (count($xPoints) > 0) || (count($yPoints) > 0);
+                    $shouldCloseOld = ($active['a_point'] !== null) || (count($oldXPoints) > 0) || (count($oldYPoints) > 0);
                     if ($shouldCloseOld) {
                         $closeEngineState = [
                             'phase' => $phase,
@@ -462,9 +640,10 @@ class NewOscillationEngineV3
                             $active['start_time']
                         );
                         $closed++;
+
+                        $active = self::createStructure($symbol, $interval, $newStartTime);
                     }
 
-                    $active = self::createStructure($symbol, $interval, $newStartTime);
                     $xPoints = self::relabelPoints($carryXPoints, 'X');
                     $yPoints = self::relabelPoints($carryYPoints, 'Y');
                     $pending = $carryPending;

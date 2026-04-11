@@ -7,12 +7,20 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.repositories.kline_repo import Interval, list_symbols
 from app.repositories.oscillation_repo import get_structure, list_structures
-from app.schemas import AbcStructureOut, NewOscillationRunIn, OscillationRunIn, OscillationStructureOut, OscillationStructureV3Out
+from app.schemas import (
+    AbcStructureOut,
+    NewOscillationRunIn,
+    OscillationRunIn,
+    OscillationStructureOut,
+    OscillationStructureV3Out,
+    OscillationStructureV4Out,
+)
 from app.services.oscillation_engine import run_oscillation_engine
 
 router = APIRouter(prefix="/trend", tags=["trend"])
 router2 = APIRouter(prefix="/trend2", tags=["trend2"])
 router3 = APIRouter(prefix="/trend3", tags=["trend3"])
+router4 = APIRouter(prefix="/trend4", tags=["trend4"])
 
 
 @router.get("/intervals")
@@ -369,6 +377,133 @@ async def runner_start_v3(
 
 @router3.post("/runner/stop")
 async def runner_stop_v3(request: Request):
+    return await runner_stop(request=request)
+
+
+@router4.get("/intervals")
+def get_intervals_v4():
+    return ["1m", "5m", "15m", "30m", "1h", "4h"]
+
+
+@router4.get("/symbols")
+def get_symbols_v4(interval: Interval = Query(...), db: Session = Depends(get_db)):
+    rows = db.execute(
+        text(
+            """
+            SELECT symbol, MIN(id) AS min_id
+            FROM oscillation_structures_v4
+            WHERE interval = :interval
+            GROUP BY symbol
+            ORDER BY min_id ASC
+            """
+        ),
+        {"interval": interval},
+    ).all()
+    syms = [r[0] for r in rows]
+    if syms:
+        return syms
+    return list_symbols(db, interval)
+
+
+@router4.get("/structures", response_model=list[OscillationStructureV4Out])
+def get_structures_v4(
+    symbol: str = Query(...),
+    interval: Interval = Query(...),
+    status: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    sql = """
+        SELECT
+          id,
+          symbol,
+          interval,
+          status,
+          x_points,
+          y_points,
+          close_reason,
+          close_condition,
+          engine_state,
+          start_time,
+          end_time,
+          open_start_time,
+          open_start_bw,
+          open_confirm_time,
+          open_confirm_bw,
+          close_start_time,
+          close_start_bw,
+          peak_bw_since_open_confirm,
+          created_at,
+          updated_at
+        FROM oscillation_structures_v4
+        WHERE symbol = :symbol
+          AND interval = :interval
+          AND (:status IS NULL OR status = :status)
+        ORDER BY id DESC
+        LIMIT :limit
+        OFFSET :offset
+    """
+    params = {"symbol": symbol.upper(), "interval": interval, "status": status, "limit": limit, "offset": offset}
+    rows = db.execute(text(sql), params).mappings()
+    return [dict(r) for r in rows]
+
+
+@router4.get("/structures/{structure_id}", response_model=OscillationStructureV4Out)
+def get_structure_detail_v4(structure_id: int, db: Session = Depends(get_db)):
+    sql = """
+        SELECT
+          id,
+          symbol,
+          interval,
+          status,
+          x_points,
+          y_points,
+          close_reason,
+          close_condition,
+          engine_state,
+          start_time,
+          end_time,
+          open_start_time,
+          open_start_bw,
+          open_confirm_time,
+          open_confirm_bw,
+          close_start_time,
+          close_start_bw,
+          peak_bw_since_open_confirm,
+          created_at,
+          updated_at
+        FROM oscillation_structures_v4
+        WHERE id = :id
+        LIMIT 1
+    """
+    row = db.execute(text(sql), {"id": structure_id}).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="not found")
+    return dict(row)
+
+
+@router4.post("/run")
+def run_engine_v4(body: NewOscillationRunIn):
+    return {"ok": True, "hint": "run in webman: NewOscillationEngineV4::run", "symbol": body.symbol, "interval": body.interval}
+
+
+@router4.get("/runner/status")
+def runner_status_v4(request: Request):
+    return runner_status(request)
+
+
+@router4.post("/runner/start")
+async def runner_start_v4(
+    request: Request,
+    dry_run: bool | None = Query(None),
+    mode: str | None = Query(None),
+):
+    return await runner_start(request=request, dry_run=dry_run, mode=mode)
+
+
+@router4.post("/runner/stop")
+async def runner_stop_v4(request: Request):
     return await runner_stop(request=request)
 
 

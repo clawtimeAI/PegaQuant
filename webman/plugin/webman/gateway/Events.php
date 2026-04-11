@@ -121,6 +121,14 @@ class Events
         self::$binanceMarketSymbols = $symbols;
         self::$binanceMarketIntervals = $intervals;
 
+        if (!self::ensurePgsqlDriver()) {
+            return;
+        }
+
+        self::initTimescaleSchema();
+
+        echo "Starting Binance market streams. symbols=" . json_encode(self::$binanceMarketSymbols) . " intervals=" . json_encode(self::$binanceMarketIntervals) . "\n";
+
         self::connectBinanceMarketStreams();
         self::startBinanceTradeStreams($symbols);
 
@@ -201,6 +209,7 @@ class Events
             self::$binanceTradeReconnectAttempts = 0;
             self::$binanceTradeStartedAt = time();
             self::$binanceTradeLastMessageAt = time();
+            echo "Binance trade stream connected.\n";
         };
 
         $conn->onMessage = function ($connection, $message) {
@@ -237,11 +246,15 @@ class Events
 
         $conn->onClose = function () {
             self::$binanceTradeConn = null;
+            echo "Binance trade stream closed.\n";
             self::scheduleBinanceTradeReconnect();
         };
 
-        $conn->onError = function () {
+        $conn->onError = function ($connection, $code = null, $msg = null) {
             self::$binanceTradeConn = null;
+            $codeStr = $code !== null ? (string)$code : '';
+            $msgStr = $msg !== null ? (string)$msg : '';
+            echo "Binance trade stream error: {$codeStr} {$msgStr}\n";
             self::scheduleBinanceTradeReconnect();
         };
 
@@ -294,6 +307,7 @@ class Events
         }
         $streamPath = implode('/', $streams);
         $remoteAddress = 'ws://fstream.binance.com:443/stream?streams=' . $streamPath;
+        echo "Connecting Binance market stream: {$remoteAddress}\n";
 
         $conn = new AsyncTcpConnection($remoteAddress);
         $conn->transport = 'ssl';
@@ -302,10 +316,12 @@ class Events
             self::$binanceMarketReconnectAttempts = 0;
             self::$binanceMarketStartedAt = time();
             self::$binanceMarketLastMessageAt = time();
+            echo "Binance market stream connected.\n";
             foreach (self::$binanceMarketSymbols as $symbol) {
                 try {
                     KlineSync::syncKlinesOnce(0, $symbol, self::$binanceMarketIntervals);
                 } catch (\Throwable $e) {
+                    echo "KlineSync::syncKlinesOnce failed: {$e->getMessage()}\n";
                 }
             }
         };
@@ -344,17 +360,22 @@ class Events
                         self::broadcastFinalKlineFromDb($symbol, $interval, $openTime);
                     }
                 } catch (\Throwable $e) {
+                    echo "KlineSync::insertClosedKlineFromStream failed: {$e->getMessage()}\n";
                 }
             }
         };
 
         $conn->onClose = function () {
             self::$binanceMarketConn = null;
+            echo "Binance market stream closed.\n";
             self::scheduleBinanceMarketReconnect();
         };
 
-        $conn->onError = function () {
+        $conn->onError = function ($connection, $code = null, $msg = null) {
             self::$binanceMarketConn = null;
+            $codeStr = $code !== null ? (string)$code : '';
+            $msgStr = $msg !== null ? (string)$msg : '';
+            echo "Binance market stream error: {$codeStr} {$msgStr}\n";
             self::scheduleBinanceMarketReconnect();
         };
 
@@ -722,11 +743,15 @@ class Events
                 boll_up numeric(20,10),
                 boll_mb numeric(20,10),
                 boll_dn numeric(20,10),
+                bw numeric(20,10),
+                mouth_state smallint NOT NULL DEFAULT 0,
                 is_check smallint NOT NULL DEFAULT 0,
                 is_key smallint NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, open_time, symbol),
                 UNIQUE(symbol, open_time)
             )");
+            self::execInitSql("ALTER TABLE $table ADD COLUMN IF NOT EXISTS mouth_state smallint NOT NULL DEFAULT 0");
+            self::execInitSql("ALTER TABLE $table ADD COLUMN IF NOT EXISTS bw numeric(20,10)");
 
             self::execInitSql("CREATE INDEX IF NOT EXISTS {$table}_symbol_time_idx ON $table(symbol, open_time ASC)");
             self::execInitSql("CREATE INDEX IF NOT EXISTS {$table}_symbol_check_time_idx ON $table(symbol, is_check, open_time ASC)");
@@ -740,7 +765,7 @@ class Events
 
                 if (self::isHypertable($table)) {
                     self::execInitSql("ALTER TABLE $table SET (timescaledb.compress, timescaledb.compress_orderby = 'open_time DESC', timescaledb.compress_segmentby = 'symbol')");
-                    self::execInitSql("SELECT add_compression_policy('$table', {$cfg['compress_after']})");
+                    self::execInitSql("SELECT add_compression_policy('$table', {$cfg['compress_after']}, if_not_exists => TRUE)");
                 }
             }
         }
