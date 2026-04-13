@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -9,6 +12,9 @@ from app.repositories.kline_repo import Interval, list_symbols
 from app.repositories.oscillation_repo import get_structure, list_structures
 from app.schemas import (
     AbcStructureOut,
+    BacktestV2RunIn,
+    LiveSignalV2OnKlineIn,
+    LiveSignalV2WarmupIn,
     NewOscillationRunIn,
     OscillationRunIn,
     OscillationStructureOut,
@@ -21,6 +27,103 @@ router = APIRouter(prefix="/trend", tags=["trend"])
 router2 = APIRouter(prefix="/trend2", tags=["trend2"])
 router3 = APIRouter(prefix="/trend3", tags=["trend3"])
 router4 = APIRouter(prefix="/trend4", tags=["trend4"])
+router_bt = APIRouter(prefix="/backtest", tags=["backtest"])
+router_sig = APIRouter(prefix="/signal", tags=["signal"])
+
+
+def _fmt_dt(v: datetime) -> str:
+    return v.strftime("%Y-%m-%d %H:%M:%S")
+
+
+@router_bt.post("/v2/run")
+async def backtest_v2_run(body: BacktestV2RunIn):
+    from backendV2.backtest.engine import BacktestConfig, BacktestEngine
+    from backendV2.report.report import generate_report
+
+    cfg = BacktestConfig(
+        symbol=body.symbol,
+        start=_fmt_dt(body.start_time),
+        end=_fmt_dt(body.end_time),
+        initial_equity=float(body.initial_equity),
+        require_mouth=bool(body.require_mouth_open),
+    )
+
+    def _run():
+        return BacktestEngine(cfg).run()
+
+    result = await asyncio.to_thread(_run)
+    out: dict[str, object] = {"ok": True, "summary": result.summary, "trades_count": len(result.trades)}
+    if body.generate_report:
+        out_dir = body.output_dir or "./reports"
+        out["report_path"] = await asyncio.to_thread(generate_report, result, out_dir)
+    return out
+
+
+def _get_v2_live_engines(request: Request) -> dict[str, object]:
+    m = getattr(request.app.state, "v2_live_signal_engines", None)
+    if m is None or not isinstance(m, dict):
+        m = {}
+        request.app.state.v2_live_signal_engines = m
+    return m
+
+
+def _signal_to_dict(sig: object) -> dict[str, object]:
+    r = getattr(sig, "__dict__", None)
+    if not isinstance(r, dict):
+        return {"raw": str(sig)}
+    direction = r.get("direction")
+    account = r.get("account")
+    open_time = r.get("open_time")
+    return {
+        "direction": getattr(direction, "value", direction),
+        "account": getattr(account, "value", account),
+        "interval": r.get("interval"),
+        "open_time": str(open_time) if open_time is not None else None,
+        "entry_price": r.get("entry_price"),
+        "stop_loss": r.get("stop_loss"),
+        "take_profit": r.get("take_profit"),
+        "boll_up": r.get("boll_up"),
+        "boll_dn": r.get("boll_dn"),
+        "boll_mb": r.get("boll_mb"),
+        "mouth_state": r.get("mouth_state"),
+        "atr": r.get("atr"),
+        "reason": r.get("reason"),
+    }
+
+
+@router_sig.post("/v2/warmup")
+async def signal_v2_warmup(request: Request, body: LiveSignalV2WarmupIn):
+    try:
+        from backendV2.signal.live_engine import LiveSignalEngine
+    except Exception:
+        raise HTTPException(status_code=501, detail="backendV2 live signal engine is not available")
+
+    engines = _get_v2_live_engines(request)
+    key = body.symbol.strip().upper()
+    eng = engines.get(key)
+    if not isinstance(eng, LiveSignalEngine):
+        eng = LiveSignalEngine(symbol=key, initial_equity=float(body.initial_equity))
+        engines[key] = eng
+    await asyncio.to_thread(eng.warmup, int(body.lookback_hours))
+    return {"ok": True, "symbol": key, "lookback_hours": int(body.lookback_hours), "accounts": eng.get_account_status()}
+
+
+@router_sig.post("/v2/on_kline")
+async def signal_v2_on_kline(request: Request, body: LiveSignalV2OnKlineIn):
+    try:
+        from backendV2.signal.live_engine import LiveSignalEngine
+    except Exception:
+        raise HTTPException(status_code=501, detail="backendV2 live signal engine is not available")
+
+    engines = _get_v2_live_engines(request)
+    key = body.symbol.strip().upper()
+    eng = engines.get(key)
+    if not isinstance(eng, LiveSignalEngine):
+        eng = LiveSignalEngine(symbol=key, initial_equity=10_000.0)
+        engines[key] = eng
+        await asyncio.to_thread(eng.warmup, 48)
+    sigs = await asyncio.to_thread(eng.on_new_kline, body.interval, body.kline)
+    return {"ok": True, "symbol": key, "interval": body.interval, "signals": [_signal_to_dict(s) for s in sigs], "accounts": eng.get_account_status()}
 
 
 @router.get("/intervals")

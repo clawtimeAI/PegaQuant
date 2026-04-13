@@ -90,6 +90,28 @@ class NewOscillationRunIn(BaseModel):
     confirm_bars: int | None = None
 
 
+class BacktestV2RunIn(BaseModel):
+    symbol: str
+    start_time: datetime
+    end_time: datetime
+    initial_equity: float = 10_000.0
+    require_mouth_open: bool = True
+    generate_report: bool = False
+    output_dir: str | None = None
+
+
+class LiveSignalV2WarmupIn(BaseModel):
+    symbol: str
+    initial_equity: float = 10_000.0
+    lookback_hours: int = 48
+
+
+class LiveSignalV2OnKlineIn(BaseModel):
+    symbol: str
+    interval: Interval
+    kline: dict[str, Any]
+
+
 class AbcStructureOut(BaseModel):
     id: int
     symbol: str
